@@ -5,6 +5,7 @@ mapping SkyPilot image tags to corresponding container image tags.
 """
 import collections
 import re
+import time
 import typing
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from sky.catalog import CloudFilter
 from sky.catalog import common
 from sky.clouds import cloud
 from sky.provision.kubernetes import utils as kubernetes_utils
+from sky.utils import annotations
 
 if typing.TYPE_CHECKING:
     import pandas as pd
@@ -53,6 +55,17 @@ def is_image_tag_valid(tag: str, region: Optional[str]) -> bool:
     return common.is_image_tag_valid_impl(_image_df, tag, region)
 
 
+# Cache the non-realtime accelerator listing so the optimizer, which queries it
+# repeatedly within a single optimize() (once per resource per DAG node), does
+# not re-run the Kubernetes node scan (credential check + label-formatter
+# detection + full node list, several API calls) every time. This returns only
+# the static per-accelerator capacity/topology map (qtys_map) -- it never
+# carries live free-GPU counts -- so a short TTL is safe: request-scoped entries
+# are cleared at every api-server request boundary, and the TTL bounds staleness
+# in long-lived callers (e.g. the serve controller). NEVER cache
+# list_accelerators_realtime below -- it reports live availability that must
+# stay fresh.
+@annotations.ttl_cache(scope='request', timer=time.time, maxsize=10, ttl=30)
 def list_accelerators(
         gpus_only: bool,
         name_filter: Optional[str],
@@ -61,9 +74,6 @@ def list_accelerators(
         case_sensitive: bool = True,
         all_regions: bool = False,
         require_price: bool = True) -> Dict[str, List[common.InstanceTypeInfo]]:
-    # TODO(romilb): We should consider putting a lru_cache() with TTL to
-    #   avoid multiple calls to kubernetes API in a short period of time (e.g.,
-    #   from the optimizer).
     return _list_accelerators(gpus_only,
                               name_filter,
                               region_filter,
