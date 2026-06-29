@@ -4,7 +4,10 @@ Currently focused on `SkyPilotReplicaManager.__init__` startup ordering:
 the daemon threads (especially `_job_status_fetcher`) must NOT race the
 main thread for `self.lock` before `_recover_replica_operations` runs.
 """
+import threading
 from unittest import mock
+
+import pytest
 
 from sky.serve import replica_managers
 
@@ -137,3 +140,60 @@ class TestSkyPilotReplicaManagerInitOrdering:
         assert '_thread_pool_refresher' in started_targets
         assert '_job_status_fetcher' in started_targets
         assert '_replica_prober' in started_targets
+
+
+def _make_manager(service_name='svc', next_replica_id=1):
+    """Build a bare SkyPilotReplicaManager with only the attributes the
+    recovery / scale-up id-allocator paths touch, skipping the heavy
+    __init__ (yaml parse, spot placer, daemon threads)."""
+    mgr = object.__new__(replica_managers.SkyPilotReplicaManager)
+    mgr.lock = threading.RLock()
+    mgr._service_name = service_name
+    mgr._next_replica_id = next_replica_id
+    mgr._launch_thread_pool = {}
+    mgr._down_thread_pool = {}
+    mgr._tick_version_spec_cache = {}
+    return mgr
+
+
+class TestVersionSpecMemoizedPerProbeRound:
+    """`_get_version_spec` reads each version's spec from the DB at most once
+    per probe round.
+
+    The readiness prober resolves the spec for every replica 4x per tick
+    (path / post_data / headers / timeout), each a `serve_state.get_spec`
+    (SQL SELECT + pickle.loads). The tick-scoped `_tick_version_spec_cache`
+    collapses those 4*N reads into one per distinct version, and is reset
+    each probe round so a rewritten spec is never served stale across rounds.
+    """
+
+    def test_memoizes_within_a_round_and_rereads_after_reset(self):
+        mgr = _make_manager()
+        calls = []
+
+        def _get_spec(_service_name, version):
+            calls.append(version)
+            return mock.Mock()
+
+        with mock.patch('sky.serve.replica_managers.serve_state.get_spec',
+                        side_effect=_get_spec):
+            # One round: 4 lookups for v1 + 2 for v2 -> 1 DB read per version.
+            for _ in range(4):
+                mgr._get_version_spec(1)
+            for _ in range(2):
+                mgr._get_version_spec(2)
+            assert calls == [1, 2]
+            # New round: the cache is reset (as _probe_all_replicas /
+            # _replica_prober do) -> the version is re-read from the DB.
+            mgr._tick_version_spec_cache = {}
+            mgr._get_version_spec(1)
+            assert calls == [1, 2, 1]
+
+    def test_raises_when_version_missing(self):
+        mgr = _make_manager()
+        with mock.patch('sky.serve.replica_managers.serve_state.get_spec',
+                        return_value=None):
+            with pytest.raises(ValueError):
+                mgr._get_version_spec(99)
+        # A missing version must not be cached as a hit.
+        assert 99 not in mgr._tick_version_spec_cache

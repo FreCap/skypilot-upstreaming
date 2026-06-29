@@ -794,6 +794,17 @@ class SkyPilotReplicaManager(ReplicaManager):
         self._down_thread_pool: thread_utils.ThreadSafeDict[
             int, thread_utils.SafeThread] = thread_utils.ThreadSafeDict()
 
+        # Tick-scoped memo of per-version specs, reset at the start of every
+        # probe round (see _probe_all_replicas). Within a single readiness probe
+        # the prober resolves the spec for every replica 4 times (readiness
+        # path, post data, headers, timeout); memoizing by version collapses
+        # those 4*N DB reads + pickle.loads into one read per distinct version
+        # per tick. Scoping it to a tick keeps it single-threaded (only the
+        # prober thread touches it) and never reuses a spec across ticks, so it
+        # cannot go stale even if a version's spec row is later rewritten.
+        self._tick_version_spec_cache: Dict[
+            int, 'service_spec.SkyServiceSpec'] = {}
+
         # Run recovery synchronously before launching the daemon threads.
         #
         # If any daemon (especially `_job_status_fetcher`, which SSHes /
@@ -1427,6 +1438,9 @@ class SkyPilotReplicaManager(ReplicaManager):
             (2) the consecutive failure times.
         The replica will be terminated if any of the thresholds exceeded.
         """
+        # Reset the per-tick spec memo so this probe round reads each version's
+        # spec from the DB at most once and never reuses a spec across ticks.
+        self._tick_version_spec_cache = {}
         probe_futures = []
         replica_to_probe = []
         with mp_pool.ThreadPool() as pool:
@@ -1549,6 +1563,12 @@ class SkyPilotReplicaManager(ReplicaManager):
                              f'{common_utils.format_exception(e)}')
                 with ux_utils.enable_traceback():
                     logger.error(f'  Traceback: {traceback.format_exc()}')
+            finally:
+                # The per-version spec memo is valid only for the probe round
+                # that just finished; drop it so the probe-interval read below
+                # (and the next round) re-reads each spec fresh and never reuses
+                # one across ticks.
+                self._tick_version_spec_cache = {}
             # TODO(MaoZiming): Probe cloud for early preemption warning.
             time.sleep(self._get_endpoint_probe_interval_seconds())
 
@@ -1640,9 +1660,13 @@ class SkyPilotReplicaManager(ReplicaManager):
                                 f'new: {new_config}')
 
     def _get_version_spec(self, version: int) -> 'service_spec.SkyServiceSpec':
+        cached = self._tick_version_spec_cache.get(version)
+        if cached is not None:
+            return cached
         spec = serve_state.get_spec(self._service_name, version)
         if spec is None:
             raise ValueError(f'Version {version} not found.')
+        self._tick_version_spec_cache[version] = spec
         return spec
 
     def _get_readiness_path(self, version: int) -> str:
