@@ -49,6 +49,10 @@ logger = sky_logging.init_logger(__name__)
 _JOB_STATUS_FETCH_INTERVAL = 30
 _PROCESS_POOL_REFRESH_INTERVAL = 20
 _RETRY_INIT_GAP_SECONDS = 60
+# Default retries for launch_cluster. Spot replicas with a placer override this
+# to 1 so a capacity failure fails over to a new location immediately instead of
+# re-hammering the same exhausted zone (see _launch_replica).
+_DEFAULT_LAUNCH_MAX_RETRY = 3
 _DEFAULT_DRAIN_SECONDS = 120
 _WAIT_LAUNCH_THREAD_TIMEOUT_SECONDS = 15
 
@@ -80,7 +84,7 @@ def launch_cluster(replica_id: int,
                        int, bool],
                    resources_override: Optional[Dict[str, Any]] = None,
                    retry_until_up: bool = True,
-                   max_retry: int = 3) -> None:
+                   max_retry: int = _DEFAULT_LAUNCH_MAX_RETRY) -> None:
     """Launch a sky serve replica cluster.
 
     This function will not wait for the job starts running. It will return
@@ -901,12 +905,23 @@ class SkyPilotReplicaManager(ReplicaManager):
             location = self._spot_placer.select_next_location(
                 current_spot_locations)
             resources_override.update(location.to_dict())
+        # When the spot placer owns failover (use_spot + placer above sets
+        # retry_until_up=False), the launch is pinned to ONE location. Retrying
+        # that same location with the default max_retry=3 + 60s exponential
+        # backoff burns minutes re-hammering an exhausted zone
+        # (ZONE_RESOURCE_POOL_EXHAUSTED / InsufficientInstanceCapacity) before
+        # the failure propagates to set_preemptive. Fail fast (one attempt) so
+        # the placer marks the location preemptive and the next launch picks a
+        # different location immediately — the failover the placer is meant to
+        # do, per the retry_until_up=False comment above.
+        launch_max_retry = (1 if use_spot and self._spot_placer is not None
+                            else _DEFAULT_LAUNCH_MAX_RETRY)
         t = thread_utils.SafeThread(
             target=launch_cluster,
             args=(replica_id, self.yaml_content, cluster_name, log_file_name,
                   self._replica_to_request_id,
                   self._replica_to_launch_cancelled, resources_override,
-                  retry_until_up),
+                  retry_until_up, launch_max_retry),
         )
         replica_port = _get_resources_ports(self.yaml_content)
 
