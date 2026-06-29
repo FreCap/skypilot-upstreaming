@@ -2205,6 +2205,22 @@ def get_pool_from_job_id(job_id: int) -> Optional[str]:
         return pool[0] if pool else None
 
 
+@db_retries.retry
+def get_execution_from_job_id(job_id: int) -> Optional[str]:
+    """Get the DAG execution mode ('parallel'/'serial') from the job id.
+
+    Returns None when the job is unknown or was created before the execution
+    column existed (legacy rows). Callers can use this to decide JobGroup-ness
+    without fetching and re-parsing the full DAG YAML.
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        execution = session.execute(
+            sqlalchemy.select(job_info_table.c.execution).where(
+                job_info_table.c.spot_job_id == job_id)).fetchone()
+        return execution[0] if execution else None
+
+
 def set_current_cluster_name(job_id: int, current_cluster_name: str) -> None:
     """Set the current cluster name for a job."""
     engine = _db_manager.get_engine()

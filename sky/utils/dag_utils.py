@@ -432,6 +432,17 @@ def _is_job_group_configs(configs: List[Dict[str, Any]]) -> bool:
     return execution == dag_lib.DagExecution.PARALLEL.value
 
 
+def is_job_group_execution(execution: Optional[str]) -> bool:
+    """Return whether a recorded execution mode denotes a JobGroup.
+
+    Mirrors `_is_job_group_configs`: a DAG is a JobGroup iff its execution mode
+    is 'parallel'. The execution mode is persisted in `job_info.execution` at
+    submission, so callers can decide JobGroup-ness from that slim column
+    instead of re-fetching and re-parsing the full DAG YAML.
+    """
+    return execution == dag_lib.DagExecution.PARALLEL.value
+
+
 def load_job_group_from_yaml(
     path: str,
     env_overrides: Optional[List[Tuple[str, str]]] = None,
