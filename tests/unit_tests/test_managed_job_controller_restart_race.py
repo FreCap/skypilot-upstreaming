@@ -26,9 +26,29 @@ def _make_task():
     }
 
 
+def _make_status_check_info():
+    """The slim per-job shape update_managed_jobs_statuses now reads."""
+    return {
+        1: {
+            'schedule_state': managed_job_state.ManagedJobScheduleState.ALIVE,
+            'controller_pid': 123,
+            'controller_pid_started_at': None,
+            'pool': None,
+            'tasks': [{
+                'task_id': 0,
+                'status': managed_job_state.ManagedJobStatus.RUNNING,
+                'job_name': 'job',
+            }],
+        }
+    }
+
+
 def _wire_dead_controller(monkeypatch, set_failed_calls, job_done_calls):
     monkeypatch.setattr(managed_job_state, 'get_jobs_to_check_status',
                         lambda job_id=None: [1])
+    monkeypatch.setattr(managed_job_state, 'get_jobs_status_check_info',
+                        lambda job_ids: _make_status_check_info())
+    # _cleanup_job_clusters still re-fetches full task rows in this change.
     monkeypatch.setattr(managed_job_state, 'get_managed_job_tasks',
                         lambda job_id: [_make_task()])
     monkeypatch.setattr(utils, 'controller_process_alive',

@@ -1382,11 +1382,13 @@ def get_managed_job_tasks(job_id: int) -> List[Dict[str, Any]]:
     jobs = []
     for row in rows:
         job_dict = _get_jobs_dict(row._mapping)  # pylint: disable=protected-access
+        # LINT.IfChange(managed_job_row_decode)
         job_dict['status'] = ManagedJobStatus(job_dict['status'])
         job_dict['schedule_state'] = ManagedJobScheduleState(
             job_dict['schedule_state'])
         if job_dict['job_name'] is None:
             job_dict['job_name'] = job_dict['task_name']
+        # LINT.ThenChange(:status_check_row_decode)
         job_dict['metadata'] = json.loads(job_dict['metadata'])
 
         # Add user YAML content for managed jobs.
@@ -1404,6 +1406,92 @@ def get_managed_job_tasks(job_id: int) -> List[Dict[str, Any]]:
 
         jobs.append(job_dict)
     return jobs
+
+
+# Cap the ids per ``IN (...)`` so a large refresh never overflows the DB
+# bind-parameter limit (SQLite's default is ~999); see
+# get_jobs_status_check_info.
+_STATUS_CHECK_JOB_ID_CHUNK = 500
+
+
+def get_jobs_status_check_info(
+        job_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batched, slim fetch of the fields the status-refresh tick needs.
+
+    ``update_managed_jobs_statuses`` only consumes a handful of small scalar
+    columns per job (the per-job ``schedule_state`` / ``controller_pid`` /
+    ``controller_pid_started_at`` / ``pool`` from ``job_info``, plus each
+    task's ``status`` and resolved name from ``spot``). The old path calls
+    ``get_managed_job_tasks`` once per job -- N heavyweight ``SELECT *`` 3-way
+    joins that also pull large text blobs (``dag_yaml_content`` etc.),
+    ``json.loads`` the metadata, and may read YAML files, all per refresh tick.
+    This collapses that ``1 + N`` pattern into a single slim
+    ``WHERE spot_job_id IN (...)`` query (chunked).
+
+    Returns a mapping ``job_id -> {schedule_state, controller_pid,
+    controller_pid_started_at, pool, tasks: [{task_id, status, job_name}]}``
+    with ``tasks`` ordered by ``task_id``. Job ids with no task rows are absent
+    from the result.
+
+    ``job_name`` mirrors get_managed_job_tasks exactly: the public job name
+    (``job_info.name``) with a fall back to ``spot.task_name`` -- NOT the
+    deprecated ``spot.job_name`` column (which holds the task name). This is
+    the value cleanup feeds to generate_managed_job_cluster_name, so it must
+    match.
+    """
+    if not job_ids:
+        return {}
+    engine = _db_manager.get_engine()
+    result: Dict[int, Dict[str, Any]] = {}
+    for start in range(0, len(job_ids), _STATUS_CHECK_JOB_ID_CHUNK):
+        chunk = job_ids[start:start + _STATUS_CHECK_JOB_ID_CHUNK]
+        query = sqlalchemy.select(
+            spot_table.c.spot_job_id,
+            spot_table.c.task_id,
+            spot_table.c.status,
+            spot_table.c.task_name,
+            job_info_table.c.name.label('job_info_name'),
+            job_info_table.c.schedule_state,
+            job_info_table.c.controller_pid,
+            job_info_table.c.controller_pid_started_at,
+            job_info_table.c.pool,
+        ).select_from(
+            spot_table.outerjoin(
+                job_info_table, spot_table.c.spot_job_id ==
+                job_info_table.c.spot_job_id)).where(
+                    spot_table.c.spot_job_id.in_(chunk)).order_by(
+                        spot_table.c.spot_job_id.asc(),
+                        spot_table.c.task_id.asc())
+        with orm.Session(engine) as session:
+            rows = session.execute(query).fetchall()
+        for row in rows:
+            mapping = row._mapping  # pylint: disable=protected-access
+            job_id = mapping['spot_job_id']
+            info = result.get(job_id)
+            if info is None:
+                # LINT.IfChange(status_check_row_decode)
+                info = {
+                    'schedule_state':
+                        ManagedJobScheduleState(mapping['schedule_state']),
+                    'controller_pid': mapping['controller_pid'],
+                    'controller_pid_started_at':
+                        mapping['controller_pid_started_at'],
+                    'pool': mapping['pool'],
+                    'tasks': [],
+                }
+                result[job_id] = info
+            # Mirror get_managed_job_tasks: prefer the public job name, fall
+            # back to task_name when it is unset.
+            job_name = mapping['job_info_name']
+            if job_name is None:
+                job_name = mapping['task_name']
+            info['tasks'].append({
+                'task_id': mapping['task_id'],
+                'status': ManagedJobStatus(mapping['status']),
+                'job_name': job_name,
+            })
+            # LINT.ThenChange(:managed_job_row_decode)
+    return result
 
 
 def _map_response_field_to_db_column(field: str):

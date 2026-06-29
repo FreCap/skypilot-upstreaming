@@ -1250,3 +1250,62 @@ class TestStatusExprSeam:
             fields=['job_id', 'status', 'task_id'])
         seq_d = [refined[j['job_id']] for j in desc]
         assert seq_d == sorted(seq_d, reverse=True), seq_d
+
+
+class TestGetJobsStatusCheckInfo:
+    """Tests for the slim batched get_jobs_status_check_info helper.
+
+    These pin the contract the status-refresh tick depends on and guard
+    against drift from get_managed_job_tasks (the LINT.IfChange-coupled
+    source of the same job_name/enum decode).
+    """
+
+    def test_empty_input_returns_empty(self, _mock_managed_jobs_db_conn):
+        assert state.get_jobs_status_check_info([]) == {}
+
+    def test_parity_with_get_managed_job_tasks(self, _seed_test_jobs):
+        job_ids = list(_seed_test_jobs.values())
+        info = state.get_jobs_status_check_info(job_ids)
+        assert set(info) == set(job_ids)
+        for job_id in job_ids:
+            tasks = state.get_managed_job_tasks(job_id)
+            entry = info[job_id]
+            # Per-job fields (from job_info, identical across a job's tasks).
+            assert entry['schedule_state'] == tasks[0]['schedule_state']
+            assert entry['controller_pid'] == tasks[0]['controller_pid']
+            assert entry['controller_pid_started_at'] == tasks[0].get(
+                'controller_pid_started_at')
+            assert entry['pool'] == tasks[0].get('pool')
+            # Per-task fields, same order.
+            assert len(entry['tasks']) == len(tasks)
+            for slim, full in zip(entry['tasks'], tasks):
+                assert slim['task_id'] == full['task_id']
+                assert slim['status'] == full['status']
+                assert slim['job_name'] == full['job_name']
+
+    def test_job_name_is_public_name_not_task_name(self, _seed_test_jobs):
+        # The seed sets job_info.name='test-job-a' but task_name='task0'.
+        # job_name MUST resolve to the public job_info.name (the value cleanup
+        # feeds to generate_managed_job_cluster_name), never the deprecated
+        # spot.job_name/task_name.
+        job_id1 = _seed_test_jobs['job_id1']
+        info = state.get_jobs_status_check_info([job_id1])
+        assert info[job_id1]['tasks'][0]['job_name'] == 'test-job-a'
+
+    def test_multi_task_tasks_ordered_by_task_id(self, _seed_multi_task_job):
+        pipeline_id = _seed_multi_task_job['pipeline_job_id']
+        info = state.get_jobs_status_check_info([pipeline_id])
+        task_ids = [t['task_id'] for t in info[pipeline_id]['tasks']]
+        assert task_ids == [0, 1]
+        assert info[pipeline_id]['tasks'][0]['status'] == (
+            state.ManagedJobStatus.SUCCEEDED)
+        assert info[pipeline_id]['tasks'][1]['status'] == (
+            state.ManagedJobStatus.RUNNING)
+
+    def test_chunking_returns_all_jobs(self, _seed_test_jobs, monkeypatch):
+        # Force tiny chunks so the id list spans several IN(...) queries; the
+        # merged result must still cover every job exactly once.
+        monkeypatch.setattr(state, '_STATUS_CHECK_JOB_ID_CHUNK', 2)
+        job_ids = list(_seed_test_jobs.values())
+        info = state.get_jobs_status_check_info(job_ids)
+        assert set(info) == set(job_ids)

@@ -676,18 +676,29 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         # that need to be checked.
         return
 
+    # Fetch the small per-job fields the loop needs for ALL jobs in one slim
+    # query instead of a heavyweight get_managed_job_tasks() join per job (a
+    # 1+N pattern that pulled large YAML/metadata blobs + json.loads on every
+    # refresh tick -- this sweep runs from ManagedJobEvent, i.e. roughly every
+    # EVENT_INTERVAL_SECONDS=300s).
+    jobs_info = managed_job_state.get_jobs_status_check_info(job_ids)
     for job_id in job_ids:
         assert job_id is not None
-        tasks = managed_job_state.get_managed_job_tasks(job_id)
+        info = jobs_info.get(job_id)
+        if info is None:
+            # No task rows for this job (e.g. it was removed between
+            # get_jobs_to_check_status and now); nothing to check.
+            continue
+        tasks = info['tasks']
         # Note: controller_pid and schedule_state are in the job_info table
         # which is joined to the spot table, so all tasks with the same job_id
-        # will have the same value for these columns. This is what lets us just
-        # take tasks[0]['controller_pid'] and tasks[0]['schedule_state'].
-        schedule_state = tasks[0]['schedule_state']
+        # share these columns. get_jobs_status_check_info returns them once per
+        # job.
+        schedule_state = info['schedule_state']
 
         # Handle jobs with schedule state (non-legacy jobs):
-        pid = tasks[0]['controller_pid']
-        pid_started_at = tasks[0].get('controller_pid_started_at')
+        pid = info['controller_pid']
+        pid_started_at = info['controller_pid_started_at']
         if schedule_state == managed_job_state.ManagedJobScheduleState.DONE:
             # There are two cases where we could get a job that is DONE.
             # 1. At query time (get_jobs_to_check_status), the job was not yet
