@@ -56,6 +56,13 @@ class SkyServeController:
             autoscalers.Autoscaler.from_spec(service_name, service_spec))
         self._host = host
         self._port = port
+        # [boltz fork] Cache of replica url -> gpu_type for the
+        # load_balancer_sync response. gpu_type (from the replica's launched
+        # accelerators) is fixed for a replica's lifetime, so it is computed
+        # once per replica and reused, instead of calling handle() per replica
+        # on every sync (which starved the LB under a launch storm). Entries are
+        # pruned when a replica is no longer ready.
+        self._lb_gpu_type_cache: Dict[str, str] = {}
         self._app = fastapi.FastAPI(lifespan=self.lifespan)
 
     @contextlib.asynccontextmanager
@@ -124,33 +131,44 @@ class SkyServeController:
             logger.info(f'Received {len(timestamps)} inflight requests.')
             self._autoscaler.collect_request_information(request_aggregator)
 
-            # Get replica information for instance-aware load balancing
-            replica_infos = serve_state.get_replica_infos(self._service_name)
             ready_replica_urls = self._replica_manager.get_active_replica_urls()
+            ready_url_set = set(ready_replica_urls)
 
-            # Use URL-to-info mapping to avoid duplication
-            replica_info = {}
-            for info in replica_infos:
-                if info.url in ready_replica_urls:
-                    # Get GPU type from handle.launched_resources.accelerators
-                    gpu_type = 'unknown'
-                    handle = info.handle()
-                    if handle is not None:
-                        accelerators = handle.launched_resources.accelerators
-                        if accelerators and len(accelerators) > 0:
-                            # Get the first accelerator type
-                            gpu_type = list(accelerators.keys())[0]
-
-                    replica_info[info.url] = {'gpu_type': gpu_type}
-
-            # Check that all ready replica URLs are included in replica_info
-            missing_urls = set(ready_replica_urls) - set(replica_info.keys())
-            if missing_urls:
-                logger.warning(f'Ready replica URLs missing from replica_info: '
-                               f'{missing_urls}')
-                # fallback: add missing URLs with unknown GPU type
-                for url in missing_urls:
-                    replica_info[url] = {'gpu_type': 'unknown'}
+            # [boltz fork] Resolve gpu_type (used by instance-aware LB policies)
+            # via a per-replica cache instead of recomputing it every sync.
+            #
+            # The previous version looped over ALL replica_infos (provisioning
+            # included) calling info.url (-> handle() + get_endpoints()) per
+            # replica AND info.handle() again for gpu_type — 150+ handle/endpoint
+            # lookups per sync against a DB the launch threads contend on, which
+            # blew the load balancer's sync timeout so the LB got an empty
+            # ready-list and 503'd every request despite dozens of READY
+            # replicas. gpu_type is fixed for a replica's lifetime, so compute it
+            # at most once per replica and cache it. Eventually consistent: a
+            # brand-new replica is reported with gpu_type 'unknown' for at most
+            # one sync before its real type is cached. info.url is evaluated only
+            # for the (usually few) newly-ready replicas, and only for READY ones
+            # (status is checked first so the && short-circuits).
+            for cached_url in list(self._lb_gpu_type_cache):
+                if cached_url not in ready_url_set:
+                    del self._lb_gpu_type_cache[cached_url]
+            uncached_urls = ready_url_set - set(self._lb_gpu_type_cache)
+            if uncached_urls:
+                for info in serve_state.get_replica_infos(self._service_name):
+                    if (info.status == serve_state.ReplicaStatus.READY and
+                            info.url in uncached_urls):
+                        gpu_type = 'unknown'
+                        handle = info.handle()
+                        if handle is not None:
+                            accelerators = handle.launched_resources.accelerators
+                            if accelerators:
+                                gpu_type = list(accelerators.keys())[0]
+                        self._lb_gpu_type_cache[info.url] = gpu_type
+            replica_info = {
+                url: {
+                    'gpu_type': self._lb_gpu_type_cache.get(url, 'unknown')
+                } for url in ready_replica_urls
+            }
 
             return responses.JSONResponse(
                 content={'replica_info': replica_info}, status_code=200)
