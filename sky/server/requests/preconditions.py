@@ -156,8 +156,14 @@ class ClusterStartCompletePrecondition(Precondition):
         self.cluster_name = cluster_name
 
     async def check(self) -> Tuple[bool, Optional[str]]:
-        cluster_status = global_user_state.get_status_from_cluster_name(
-            self.cluster_name)
+        # Use the async DB read: this runs on the api-server event loop (the
+        # precondition is polled ~once per second per pending launch), so the
+        # sync variant would block the loop for every concurrent waiter. The
+        # other DB read in this method (get_request_tasks_async) is already
+        # async.
+        cluster_status = (
+            await global_user_state.get_status_from_cluster_name_async(
+                self.cluster_name))
         if cluster_status is status_lib.ClusterStatus.UP:
             # Shortcut for started clusters, ignore cluster not found
             # since the cluster record might not yet be created by the
