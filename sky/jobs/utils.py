@@ -602,6 +602,18 @@ def controller_process_alive(record: managed_job_state.ControllerPidRecord,
         return False
 
 
+def _controller_is_restarting() -> bool:
+    """Whether a controller process is being restarted under us.
+
+    The signal file is created while the controller is recovering from a
+    failure (see sky/templates/kubernetes-ray.yml.j2). While it is present,
+    update_managed_jobs_statuses must NOT mark jobs FAILED_CONTROLLER -- the
+    controller process the job depends on is being restarted, not gone for good.
+    """
+    return os.path.exists(
+        os.path.expanduser(constants.PERSISTENT_RUN_RESTARTING_SIGNAL_FILE))
+
+
 def update_managed_jobs_statuses(job_id: Optional[int] = None):
     """Update managed job status if the controller process failed abnormally.
 
@@ -614,16 +626,14 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
     Note: we expect that job_id, if provided, refers to a nonterminal job or a
     job that has not completed its cleanup (schedule state not DONE).
     """
-    # This signal file suggests that the controller is recovering from a
+    # The signal file suggests that the controller is recovering from a
     # failure. See sky/templates/kubernetes-ray.yml.j2 for more details.
     # When restarting the controller processes, we don't want this event to
     # set the job status to FAILED_CONTROLLER.
     # TODO(tian): Change this to restart the controller process. For now we
     # disabled it when recovering because we want to avoid caveats of infinite
     # restart of last controller process that fully occupied the controller VM.
-    if os.path.exists(
-            os.path.expanduser(
-                constants.PERSISTENT_RUN_RESTARTING_SIGNAL_FILE)):
+    if _controller_is_restarting():
         return
 
     def _cleanup_job_clusters(job_id: int) -> Optional[str]:
@@ -756,6 +766,19 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         # FAILED_CONTROLLER.
         logger.error(f'Controller process for job {job_id} has exited '
                      'abnormally. Setting the job status to FAILED_CONTROLLER.')
+
+        # Re-check the restart signal right before the destructive action. The
+        # top-of-function check is a stale snapshot: marking many jobs takes
+        # time, and a controller restart (which creates the signal file) can
+        # begin in that window. Acting on the stale snapshot would terminate
+        # this job's cluster and mark it FAILED_CONTROLLER while its controller
+        # is being restarted under it -- losing a job that would otherwise
+        # resume.
+        if _controller_is_restarting():
+            logger.info(
+                f'Controller restart in progress; deferring FAILED_CONTROLLER '
+                f'for job {job_id} (will re-check on the next status update).')
+            continue
 
         # Cleanup clusters and capture any errors.
         cleanup_error = _cleanup_job_clusters(job_id)
