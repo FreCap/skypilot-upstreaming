@@ -618,8 +618,49 @@ def init_db_async(func):
     return wrapper
 
 
+def _log_orphaned_inflight_requests() -> None:
+    """Log any requests still in-flight when the API server last stopped.
+
+    ``reset_db_and_logs`` (run on every API-server startup) wipes the request DB
+    and its logs, and the executor child processes that ran those requests died
+    with the previous process. So a request that was still PENDING/WAITING/
+    RUNNING -- notably a long provisioning launch held by a long worker -- is
+    silently dropped: the caller (CLI, or a serve/jobs controller) awaiting it
+    sees the request vanish, while any half-provisioned cluster lives on in the
+    separate cluster-state DB and leaks until a later status refresh reaps it.
+
+    We cannot resume those requests here (their worker processes are gone), but
+    we can refuse to lose them silently: enumerate them at WARNING so the drop
+    is alertable and any leaked clusters are reconcilable. Best effort -- a scan
+    failure (e.g. an incompatible on-disk schema after an upgrade) must never
+    block startup.
+    """
+    try:
+        orphaned = request_storage.get_request_backend().query_requests(
+            req_filter=RequestTaskFilter(
+                status=RequestStatus.active_statuses()))
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug('Could not scan for orphaned in-flight requests during '
+                     f'API server startup (continuing): {e}')
+        return
+    if not orphaned:
+        return
+    logger.warning(
+        f'API server startup is clearing {len(orphaned)} request(s) that were '
+        'still in-flight when the server last stopped; their executor '
+        'processes are gone and the request rows are being wiped. Any clusters '
+        'they were provisioning may leak until the next status refresh:')
+    for req in orphaned:
+        cluster = f' cluster={req.cluster_name}' if req.cluster_name else ''
+        logger.warning(f'  dropped in-flight request {req.request_id} '
+                       f'name={req.name!r} status={req.status.value}{cluster}')
+
+
 def reset_db_and_logs():
     """Clear local state and re-initialize the request storage backend."""
+    # Surface any requests still in-flight when the server stopped BEFORE we
+    # wipe them, so the drop is alertable rather than silent (see helper).
+    _log_orphaned_inflight_requests()
     logger.debug('clearing local API server database')
     server_common.clear_local_api_server_database()
     logger.debug('clearing local API server logs directory at '
