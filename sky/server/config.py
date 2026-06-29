@@ -222,7 +222,22 @@ def _max_long_worker_parallism(cpu_count: int,
                   if job_utils.is_consolidation_mode() else
                   server_constants.MIN_AVAIL_MEM_GB)
     available_mem = max(0, mem_size_gb - max_memory)
-    cpu_based_max_parallel = cpu_count * _CPU_MULTIPLIER_FOR_LONG_WORKERS
+    # [boltz fork] Long workers run the per-replica launch (provision + SSH +
+    # setup), each held for the WHOLE launch (~6-15 min), so this pool is the
+    # binding limit on concurrent provisioning for large serve fleets — far
+    # below the serve replica cap. It defaults to cpu_count * 2 (= pod CPU
+    # *request* * 2), which on a 16-CPU-request pod is only 32, leaving 100+
+    # admitted replicas queued. Make the multiplier env-tunable so we can widen
+    # provisioning concurrency without re-sizing the pod CPU (launches are
+    # I/O-bound — SSH/cloud-API — so heavy CPU oversubscription is fine).
+    cpu_multiplier = _CPU_MULTIPLIER_FOR_LONG_WORKERS
+    _mult_override = os.environ.get('SKYPILOT_LONG_WORKER_CPU_MULTIPLIER')
+    if _mult_override is not None:
+        try:
+            cpu_multiplier = max(1, int(_mult_override))
+        except ValueError:
+            pass
+    cpu_based_max_parallel = cpu_count * cpu_multiplier
     mem_based_max_parallel = int(available_mem * _MAX_MEM_PERCENT_FOR_BLOCKING /
                                  LONG_WORKER_MEM_GB)
     n = max(_MIN_LONG_WORKERS,
