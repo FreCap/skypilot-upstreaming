@@ -835,6 +835,26 @@ class SkyPilotReplicaManager(ReplicaManager):
         assert (not self._launch_thread_pool and not self._down_thread_pool
                ), 'We should not have any running threads in a recovery run'
 
+        # Seed the replica-id allocator from durable state. A fresh
+        # ReplicaManager initializes `self._next_replica_id` to 1 (see
+        # `ReplicaManager.__init__`). On a controller respawn -- a
+        # consolidation-mode API-server pod restart re-running `_start`
+        # (is_recovery=True), or the in-place controller-respawn path -- a
+        # brand-new ReplicaManager is constructed, resetting the allocator to
+        # 1 even though replicas 1..N survived in the DB. The next `scale_up`
+        # would then reuse an id a live replica still owns: `_launch_replica`
+        # upserts a fresh `ReplicaInfo` over the survivor's persisted row
+        # (`add_or_update_replica` is keyed on (service_name, replica_id)),
+        # destroying its status/version/failure history, and re-runs
+        # `sky.launch` against its live serving cluster. Advance the allocator
+        # past every persisted id so new replicas always get a fresh id. On a
+        # first run there are no replicas, so this stays at 1 (no-op).
+        existing_replica_ids = [
+            info.replica_id
+            for info in serve_state.get_replica_infos(self._service_name)
+        ]
+        self._next_replica_id = max(existing_replica_ids, default=0) + 1
+
         # There is a FIFO queue with capacity _MAX_NUM_LAUNCH for
         # _launch_replica.
         # We prioritize PROVISIONING replicas since they were previously
@@ -927,6 +947,16 @@ class SkyPilotReplicaManager(ReplicaManager):
     @with_lock
     def scale_up(self,
                  resources_override: Optional[Dict[str, Any]] = None) -> None:
+        # Defensive: never hand `_launch_replica` an id that still has a
+        # durable replica row. `add_or_update_replica` is an upsert keyed on
+        # (service_name, replica_id), so reusing a live id would overwrite a
+        # surviving replica's persisted state and re-launch its cluster. With
+        # the allocator seeded from durable state in
+        # `_recover_replica_operations` this should never fire, but guard
+        # against any drift so id allocation can never clobber a live replica.
+        while serve_state.get_replica_info_from_id(
+                self._service_name, self._next_replica_id) is not None:
+            self._next_replica_id += 1
         self._launch_replica(self._next_replica_id, resources_override)
         self._next_replica_id += 1
 
