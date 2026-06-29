@@ -619,12 +619,26 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             'InstanceAware Autoscaler requires dict type target_qps_per_replica'
         # Re-assign with correct type using setattr to avoid typing issues
         self.target_qps_per_replica = spec.target_qps_per_replica
+        # Memoizes a replica's resolved GPU type (replica_id -> gpu_type) so the
+        # blocking handle() DB read + unpickle is not repeated for the same
+        # replica across the 2-3 passes per decision tick. A replica's GPU type
+        # is fixed for its lifetime; only successfully-resolved types are cached
+        # (a still-provisioning replica with no handle yet is re-resolved next
+        # pass). Pruned to the live replica set each tick.
+        self._gpu_type_cache: Dict[int, str] = {}
 
     def _generate_scaling_decisions(
         self,
         replica_infos: List['replica_managers.ReplicaInfo'],
     ) -> List[AutoscalerDecision]:
         """Generate autoscaling decisions with instance-aware logic."""
+        # Drop cached GPU types for replicas that no longer exist so the cache
+        # stays bounded to the live replica set.
+        live_replica_ids = {info.replica_id for info in replica_infos}
+        for replica_id in list(self._gpu_type_cache):
+            if replica_id not in live_replica_ids:
+                del self._gpu_type_cache[replica_id]
+
         # Always use instance-aware logic
         # since target_qps_per_replica is guaranteed to be dict
         self._set_target_num_replicas_with_instance_aware_logic(replica_infos)
@@ -828,6 +842,9 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
     def _get_gpu_type_from_replica_info(
             self, replica_info: 'replica_managers.ReplicaInfo') -> str:
         """Extract GPU type from ReplicaInfo object."""
+        cached = self._gpu_type_cache.get(replica_info.replica_id)
+        if cached is not None:
+            return cached
         gpu_type = 'unknown'
         handle = replica_info.handle()
         if handle is not None:
@@ -835,6 +852,10 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             if accelerators and len(accelerators) > 0:
                 # Get the first accelerator type
                 gpu_type = list(accelerators.keys())[0]
+        # Only cache a resolved type; a provisioning replica reports 'unknown'
+        # until its handle exists, and must be re-resolved on later ticks.
+        if gpu_type != 'unknown':
+            self._gpu_type_cache[replica_info.replica_id] = gpu_type
         return gpu_type
 
     def _extract_target_qps_list_from_ready_replicas(
