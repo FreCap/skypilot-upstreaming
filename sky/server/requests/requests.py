@@ -1640,12 +1640,18 @@ class SqliteRequestBackend(request_storage.RequestBackend):
     def get_shutdown_active_requests(self) -> List[Tuple[str, str]]:
         """Get (request_id, name) pairs to wait for during graceful shutdown."""
 
+        # Wait on every non-terminal request. Use active_statuses() rather than
+        # re-hardcoding the list: this query was the lone outlier that drifted
+        # out of sync and silently dropped the WAITING status. A
+        # request parked in WAITING -- on a retry backoff or an external
+        # continue-condition, with its resume timer living only in an in-memory
+        # monitor thread -- would otherwise be neither waited for nor handed to
+        # interrupt_request_for_retry, so should_retry would never be set; its
+        # timer would die with the process and reset_db_and_logs would wipe the
+        # row on the next boot, silently dropping it on a clean restart.
         tasks = self.query_requests(
             RequestTaskFilter(
-                status=[
-                    RequestStatus.PENDING,
-                    RequestStatus.RUNNING,
-                ],
+                status=RequestStatus.active_statuses(),
                 fields=['request_id', 'name'],
             ))
         return [(t.request_id, t.name) for t in tasks]
