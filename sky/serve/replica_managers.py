@@ -1189,18 +1189,31 @@ class SkyPilotReplicaManager(ReplicaManager):
         """
         # To avoid `dictionary changed size during iteration` error.
         launch_thread_pool_snapshot = list(self._launch_thread_pool.items())
-        for replica_id, t in launch_thread_pool_snapshot:
-            if t.is_alive():
-                continue
-            with filelock.FileLock(controller_utils.get_resources_lock_path()):
+        # Read the launch budget ONCE per tick, under the cross-process
+        # resources lock held across the whole admission pass. Reading it
+        # outside the lock would let a concurrent service manager admit against
+        # the same stale count and oversubscribe the launch cap. Tracking the
+        # delta locally avoids the O(K*N) per-replica re-scan this read used to
+        # incur -- can_provision/can_terminate otherwise unpickle the ENTIRE
+        # replica table per launching/terminating replica (measured ~1.7s/tick
+        # at N=2000, K=140; grows with fleet size).
+        with filelock.FileLock(controller_utils.get_resources_lock_path()):
+            in_flight = controller_utils.in_flight_launch_count()
+            for replica_id, t in launch_thread_pool_snapshot:
+                if t.is_alive():
+                    continue
                 info = serve_state.get_replica_info_from_id(
                     self._service_name, replica_id)
                 assert info is not None, replica_id
                 error_in_sky_launch = False
                 if info.status == serve_state.ReplicaStatus.PENDING:
                     # sky.launch not started yet
-                    if controller_utils.can_provision(self._is_pool):
+                    if controller_utils.can_provision(self._is_pool,
+                                                      in_flight=in_flight):
                         t.start()
+                        # This replica is now provisioning; reflect it locally
+                        # instead of re-scanning the DB on the next replica.
+                        in_flight += 1
                         info.status_property.sky_launch_status = (
                             common_utils.ProcessStatus.RUNNING)
                 else:
@@ -1260,8 +1273,13 @@ class SkyPilotReplicaManager(ReplicaManager):
             if (info.status_property.sky_down_status ==
                     common_utils.ProcessStatus.SCHEDULED):
                 # sky.down not started yet
-                if controller_utils.can_terminate(self._is_pool):
+                if controller_utils.can_terminate(self._is_pool,
+                                                  in_flight=in_flight):
                     t.start()
+                    # This replica is now terminating; reflect it locally
+                    # (weighted like in_flight_launch_count) instead of
+                    # re-scanning the DB on the next replica.
+                    in_flight += 1.0 / controller_utils.SERVE_LAUNCH_RATIO
                     info.status_property.sky_down_status = (
                         common_utils.ProcessStatus.RUNNING)
                     serve_state.add_or_update_replica(self._service_name,
@@ -1309,7 +1327,6 @@ class SkyPilotReplicaManager(ReplicaManager):
                     logger.error(f'  Traceback: {traceback.format_exc()}')
             time.sleep(_PROCESS_POOL_REFRESH_INTERVAL)
 
-    @with_lock
     def _fetch_job_status(self) -> None:
         """Fetch the service job status of all replicas.
 
@@ -1320,6 +1337,14 @@ class SkyPilotReplicaManager(ReplicaManager):
         It is still needed even if we already keep probing the replicas,
         since the replica job might launch the API server in the background
         (using &), and the readiness probe will not detect the worker failure.
+
+        NOTE: this does NOT hold ``self.lock`` across the per-replica
+        ``get_job_status`` SSH walk. An unreachable (e.g. preempted spot)
+        replica's SSH connect hangs at the kernel TCP timeout (tens of seconds
+        to minutes); holding the lock across the walk would block the
+        refresher / prober / scaler -- which all take ``self.lock`` -- for the
+        whole walk, stalling autoscaling exactly when the fleet is churning.
+        The lock is taken only for the brief state mutations.
         """
         infos = serve_state.get_replica_infos(self._service_name)
         for info in infos:
@@ -1333,13 +1358,25 @@ class SkyPilotReplicaManager(ReplicaManager):
             # Use None to fetch latest job, which stands for user task job
             job_ids = [1] if self._is_pool else None
             try:
+                # SSH into the replica's head node -- intentionally OUTSIDE
+                # self.lock so an unreachable replica cannot wedge the loop.
                 job_statuses = backend.get_job_status(handle,
                                                       job_ids,
                                                       stream_logs=False)
             except exceptions.CommandError:
                 # If the job status fetch failed, it is likely that the
                 # cluster is preempted.
-                is_preempted = self._handle_preemption(info)
+                with self.lock:
+                    # Re-read under the lock: another thread may have
+                    # mutated/purged/scheduled-down this replica while we SSHed
+                    # lock-free; acting on the stale snapshot could clobber the
+                    # newer state or double-terminate.
+                    fresh = serve_state.get_replica_info_from_id(
+                        self._service_name, info.replica_id)
+                    if fresh is None or not (
+                            fresh.status_property.should_track_service_status()):
+                        continue
+                    is_preempted = self._handle_preemption(fresh)
                 if is_preempted:
                     continue
                 # Re-raise the exception if it is not preempted.
@@ -1347,15 +1384,23 @@ class SkyPilotReplicaManager(ReplicaManager):
             job_status = job_statuses[1] if self._is_pool else list(
                 job_statuses.values())[0]
             if job_status in job_lib.JobStatus.user_code_failure_states():
-                info.status_property.user_app_failed = True
-                serve_state.add_or_update_replica(self._service_name,
-                                                  info.replica_id, info)
-                logger.warning(
-                    f'Service job for replica {info.replica_id} FAILED. '
-                    'Terminating...')
-                self._terminate_replica(info.replica_id,
-                                        sync_down_logs=True,
-                                        replica_drain_delay_seconds=0)
+                with self.lock:
+                    # Re-read under the lock: another thread (e.g. scale_down)
+                    # may have terminated or mutated this replica while we
+                    # were SSHing without the lock.
+                    fresh = serve_state.get_replica_info_from_id(
+                        self._service_name, info.replica_id)
+                    if fresh is None:
+                        continue
+                    fresh.status_property.user_app_failed = True
+                    serve_state.add_or_update_replica(self._service_name,
+                                                      fresh.replica_id, fresh)
+                    logger.warning(
+                        f'Service job for replica {fresh.replica_id} FAILED. '
+                        'Terminating...')
+                    self._terminate_replica(fresh.replica_id,
+                                            sync_down_logs=True,
+                                            replica_drain_delay_seconds=0)
 
     def _job_status_fetcher(self) -> None:
         """Periodically fetch the service job status of all replicas."""
