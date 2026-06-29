@@ -448,6 +448,10 @@ def encode_requests(requests: List[Request]) -> List[payloads.RequestPayload]:
             status_msg=request.status_msg,
             should_retry=request.should_retry,
             finished_at=request.finished_at,
+            # Keep parity with Request.readable_encode (which sets this), so the
+            # by-id /api/status branch is field-identical after switching to the
+            # batched encoder.
+            file_mounts_blob_id=request.file_mounts_blob_id,
         )
         encoded_requests.append(payload)
     return encoded_requests

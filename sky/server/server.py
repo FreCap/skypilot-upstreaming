@@ -2606,15 +2606,17 @@ async def api_status(
             ))
         return requests_lib.encode_requests(request_tasks)
     else:
-        encoded_request_tasks = []
+        matched_request_tasks = []
         for request_id in request_ids:
             request_tasks = await requests_lib.get_requests_async_with_prefix(
                 request_id)
             if request_tasks is None:
                 continue
-            for request_task in request_tasks:
-                encoded_request_tasks.append(request_task.readable_encode())
-        return encoded_request_tasks
+            matched_request_tasks.extend(request_tasks)
+        # encode_requests batches the user lookup (one get_all_users instead of
+        # a per-row readable_encode -> get_user N+1) and produces the same
+        # display payload.
+        return requests_lib.encode_requests(matched_request_tasks)
 
 
 @app.get('/dashboard_config')
