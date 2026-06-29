@@ -1,9 +1,79 @@
 """Utility functions for threads."""
 
 import threading
-from typing import Any, Dict, Generic, Optional, overload, TypeVar
+import time
+from typing import Any, Callable, Dict, Generic, Optional, overload, TypeVar
 
+from sky import sky_logging
 from sky.utils import common_utils
+
+logger = sky_logging.init_logger(__name__)
+
+_DEFAULT_THREAD_RESTART_BACKOFF_SECONDS = 5.0
+
+
+def start_supervised_thread(
+    target: Callable[[], Any],
+    name: str,
+    restart_backoff_seconds: float = _DEFAULT_THREAD_RESTART_BACKOFF_SECONDS,
+    stop_event: Optional[threading.Event] = None,
+) -> threading.Thread:
+    """Run ``target`` in a background thread, restarting it if it ever exits.
+
+    Several long-lived control-loop duties (e.g. the serve autoscaler and the
+    replica manager's refresher / prober / job-status fetcher) run as bare
+    ``threading.Thread``s whose bodies are ``while True: try/except Exception``.
+    They survive ordinary exceptions, but a ``BaseException`` escaping (or the
+    target returning at all) silently ends the thread while the host process
+    keeps serving HTTP -- a "half-dead" controller where, for example,
+    autoscaling never happens again, failed replicas keep getting traffic, or
+    spot preemptions stop being reaped, and only a full process restart clears
+    it.
+
+    This wraps ``target`` so any exit -- a normal return OR a ``BaseException``
+    -- is logged and the target is re-run after a short backoff, so the duty
+    cannot silently stop. Returns the supervisor thread.
+
+    ``stop_event``: if provided, the supervisor stops restarting (and the
+    thread exits) once it is set, checked between restarts. The serve call
+    sites pass none -- they restart forever and are torn down with the process
+    -- but it makes graceful shutdown and testing possible.
+    """
+
+    def _keep_running() -> bool:
+        return stop_event is None or not stop_event.is_set()
+
+    def _supervise() -> None:
+        while _keep_running():
+            try:
+                target()
+                if not _keep_running():
+                    break
+                # The wrapped duties are infinite loops; a normal return is
+                # itself unexpected, so restart it too.
+                logger.error(
+                    f'Supervised thread {name!r} returned unexpectedly (its '
+                    f'loop should never exit); restarting after '
+                    f'{restart_backoff_seconds}s.')
+            except BaseException as e:  # pylint: disable=broad-except
+                if not _keep_running():
+                    break
+                logger.error(
+                    f'Supervised thread {name!r} died with '
+                    f'{common_utils.format_exception(e)!r}; restarting after '
+                    f'{restart_backoff_seconds}s.')
+            # Interruptible backoff so a stop is honored promptly.
+            if stop_event is not None:
+                stop_event.wait(restart_backoff_seconds)
+            else:
+                time.sleep(restart_backoff_seconds)
+
+    # Match the non-daemon semantics of the bare threads this replaces; the
+    # serve controller is torn down via signal / os._exit (force-killed), not a
+    # clean interpreter shutdown, so daemon-ness is moot for the real exit path.
+    thread = threading.Thread(target=_supervise, name=f'supervised-{name}')
+    thread.start()
+    return thread
 
 
 class SafeThread(threading.Thread):
