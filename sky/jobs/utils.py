@@ -719,6 +719,18 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
             failure_reason = ('Inconsistent internal job state. This is a bug.')
         elif pid is None:
             # Non-legacy job and controller process has not yet started.
+            if (schedule_state in [
+                    managed_job_state.ManagedJobScheduleState.INACTIVE,
+                    managed_job_state.ManagedJobScheduleState.WAITING,
+            ]):
+                # It is expected that the controller hasn't been started yet.
+                # The controller process has not run, so there is no controller
+                # status to read; skip the per-job filelock + SQLite read in
+                # job_lib.get_status(). This is the common backlog state under a
+                # large submission fan-out, so avoiding it per job per refresh
+                # tick removes a lock acquisition + DB query for every pending
+                # job.
+                continue
             controller_status = job_lib.get_status(job_id)
             if controller_status == job_lib.JobStatus.FAILED_SETUP:
                 # We should fail the case where the controller status is
@@ -728,12 +740,6 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
                 # status is FAILED_DRIVER or FAILED.
                 logger.error('Failed to setup the cloud dependencies for '
                              'the managed job.')
-            elif (schedule_state in [
-                    managed_job_state.ManagedJobScheduleState.INACTIVE,
-                    managed_job_state.ManagedJobScheduleState.WAITING,
-            ]):
-                # It is expected that the controller hasn't been started yet.
-                continue
             elif (schedule_state ==
                   managed_job_state.ManagedJobScheduleState.LAUNCHING):
                 # This is unlikely but technically possible. There's a brief

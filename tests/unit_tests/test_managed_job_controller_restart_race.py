@@ -11,8 +11,11 @@ The fix re-checks the restart signal immediately before the destructive action.
 These tests pin that: a restart that appears mid-cycle defers the job's
 FAILED_CONTROLLER, while a genuinely dead controller (no restart) still fails.
 """
+import pytest
+
 from sky.jobs import state as managed_job_state
 from sky.jobs import utils
+from sky.skylet import job_lib
 
 
 def _make_task():
@@ -98,3 +101,60 @@ def test_controller_is_restarting_reflects_signal_file(monkeypatch, tmp_path):
     assert utils._controller_is_restarting() is False
     sig.write_text('')
     assert utils._controller_is_restarting() is True
+
+
+def _make_pending_status_check_info(schedule_state):
+    """A pending job whose controller process has not started (pid is None)."""
+    return {
+        1: {
+            'schedule_state': schedule_state,
+            'controller_pid': None,
+            'controller_pid_started_at': None,
+            'pool': None,
+            'tasks': [{
+                'task_id': 0,
+                'status': managed_job_state.ManagedJobStatus.PENDING,
+                'job_name': 'job',
+            }],
+        }
+    }
+
+
+@pytest.mark.parametrize('schedule_state', [
+    managed_job_state.ManagedJobScheduleState.INACTIVE,
+    managed_job_state.ManagedJobScheduleState.WAITING,
+])
+def test_pending_job_skips_controller_status_read(monkeypatch, schedule_state):
+    """A pid-None INACTIVE/WAITING job is skipped before the skylet controller
+    status is read.
+
+    Two things are pinned: (1) the per-job filelock + SQLite read in
+    ``job_lib.get_status`` is avoided for the pending backlog, and (2) a stale
+    skylet ``FAILED_SETUP`` row cannot strand a recovering job — a WAITING job
+    (e.g. one reset by ``reset_jobs_for_recovery``) must be left for the
+    scheduler to relaunch, not marked FAILED_CONTROLLER.
+    """
+    get_status_calls = []
+    set_failed_calls = []
+
+    def _record_get_status(job_id):
+        get_status_calls.append(job_id)
+        return job_lib.JobStatus.FAILED_SETUP
+
+    monkeypatch.setattr(managed_job_state, 'get_jobs_to_check_status',
+                        lambda job_id=None: [1])
+    monkeypatch.setattr(
+        managed_job_state, 'get_jobs_status_check_info',
+        lambda job_ids: _make_pending_status_check_info(schedule_state))
+    monkeypatch.setattr(job_lib, 'get_status', _record_get_status)
+    monkeypatch.setattr(managed_job_state, 'set_failed',
+                        lambda *a, **k: set_failed_calls.append((a, k)))
+    monkeypatch.setattr(utils, '_controller_is_restarting', lambda: False)
+
+    utils.update_managed_jobs_statuses(job_id=1)
+
+    assert get_status_calls == [], (
+        'controller status must not be read for a pid-None pending job')
+    assert set_failed_calls == [], (
+        'a pending (pre-controller) job must not be FAILED_CONTROLLER, even if '
+        'a stale skylet status would read FAILED_SETUP')
