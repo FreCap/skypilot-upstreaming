@@ -427,7 +427,16 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                     raise RuntimeError(
                         controller_utils.get_max_services_error_message(
                             task.service.pool))
-            success = serve_state.add_service(
+            # Create the service working directory before the DB write so a
+            # crash here can at most leave a harmless empty dir. The service
+            # row and its initial version row are then written atomically
+            # below: writing them as two separate commits leaves a crash
+            # window that strands a `services` row with no `version_specs`
+            # row, which the latest-version inner join hides from status,
+            # recovery and teardown, and which blocks re-`up` of the name.
+            os.makedirs(service_dir, exist_ok=True)
+            version = constants.INITIAL_VERSION
+            success = serve_state.add_service_with_initial_version(
                 service_name,
                 controller_job_id=job_id,
                 policy=service_spec.autoscaling_policy_str(),
@@ -439,6 +448,9 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                 pool=service_spec.pool,
                 controller_pid=os.getpid(),
                 controller_ip=pod_ip,
+                version=version,
+                spec=service_spec,
+                yaml_content=yaml_content,
                 entrypoint=entrypoint)
         # Directly throw an error here. See sky/serve/api.py::up
         # for more details.
@@ -446,14 +458,6 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
             cleanup_storage(yaml_content)
             with ux_utils.print_exception_no_traceback():
                 raise ValueError(f'Service {service_name} already exists.')
-
-        # Create the service working directory.
-        os.makedirs(service_dir, exist_ok=True)
-
-        version = constants.INITIAL_VERSION
-        # Add initial version information to the service state.
-        serve_state.add_or_update_version(service_name, version, service_spec,
-                                          yaml_content)
     else:
         latest_version = serve_state.get_latest_version(service_name)
         if latest_version is None:
