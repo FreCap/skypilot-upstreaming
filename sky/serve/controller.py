@@ -52,8 +52,14 @@ class SkyServeController:
             replica_managers.SkyPilotReplicaManager(service_name=service_name,
                                                     spec=service_spec,
                                                     version=version))
+        # Pass `version` so a controller rebuilt on restart/respawn starts the
+        # autoscaler at the recovered latest version (matching the replica
+        # manager above), not INITIAL_VERSION. Otherwise a service updated past
+        # v1 would have its autoscaler treat every live replica as outdated and
+        # churn replicas forever after any restart.
         self._autoscaler: autoscalers.Autoscaler = (
-            autoscalers.Autoscaler.from_spec(service_name, service_spec))
+            autoscalers.Autoscaler.from_spec(service_name, service_spec,
+                                             version))
         self._host = host
         self._port = port
         self._app = fastapi.FastAPI(lifespan=self.lifespan)
@@ -190,12 +196,20 @@ class SkyServeController:
                     logger.info('Autoscaler type changed to '
                                 f'{type(new_autoscaler)}, updating autoscaler.')
                     old_autoscaler = self._autoscaler
-                    self._autoscaler = new_autoscaler
-                    self._autoscaler.load_dynamic_states(
+                    new_autoscaler.load_dynamic_states(
                         old_autoscaler.dump_dynamic_states())
-                self._autoscaler.update_version(version,
-                                                service,
-                                                update_mode=update_mode)
+                    # Initialize the replacement to the update version BEFORE
+                    # publishing it, so the autoscaler thread never observes a
+                    # transient INITIAL_VERSION autoscaler (which would treat
+                    # every live replica as outdated and churn).
+                    new_autoscaler.update_version(version,
+                                                  service,
+                                                  update_mode=update_mode)
+                    self._autoscaler = new_autoscaler
+                else:
+                    self._autoscaler.update_version(version,
+                                                    service,
+                                                    update_mode=update_mode)
                 return responses.JSONResponse(content={'message': 'Success'},
                                               status_code=200)
             except Exception as e:  # pylint: disable=broad-except

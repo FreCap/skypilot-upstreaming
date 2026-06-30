@@ -1,8 +1,10 @@
 """Unit tests for sky.serve.autoscalers."""
+import types
 import unittest
 from unittest import mock
 
 from sky.serve import autoscalers
+from sky.serve import constants
 from sky.serve import replica_managers
 from sky.serve import serve_state
 
@@ -151,6 +153,100 @@ class TestSelectNonterminalReplicasToScaleDown(unittest.TestCase):
         # Should select old version replica first despite having more jobs
         self.assertEqual(len(result), 1)
         self.assertEqual(result, [1])
+
+
+class TestAutoscalerVersionInitialization(unittest.TestCase):
+    """The autoscaler must be constructed at the recovered service version.
+
+    On an API-server restart/respawn the controller is rebuilt and passes the
+    durable latest version to `Autoscaler.from_spec`. If the autoscaler instead
+    reset to INITIAL_VERSION (1) while live replicas are at version >= 2 (any
+    service updated at least once), its version filters would treat every
+    running replica as outdated and drive permanent replica churn. These tests
+    pin that `version` is honored at construction and forwarded by `from_spec`.
+    """
+
+    def test_base_init_sets_latest_version_from_arg(self):
+        spec = types.SimpleNamespace(min_replicas=1,
+                                     max_replicas=3,
+                                     num_overprovision=None)
+        autoscaler = object.__new__(autoscalers.Autoscaler)
+        autoscalers.Autoscaler.__init__(autoscaler, 'svc', spec, version=5)
+        self.assertEqual(autoscaler.latest_version, 5)
+        # Must stay one below latest so the unrecoverable-failure early-return
+        # only arms once a replica at the latest version becomes ready.
+        self.assertEqual(autoscaler.latest_version_ever_ready, 4)
+
+    def test_base_init_defaults_to_initial_version(self):
+        spec = types.SimpleNamespace(min_replicas=1,
+                                     max_replicas=3,
+                                     num_overprovision=None)
+        autoscaler = object.__new__(autoscalers.Autoscaler)
+        autoscalers.Autoscaler.__init__(autoscaler, 'svc', spec)
+        self.assertEqual(autoscaler.latest_version, constants.INITIAL_VERSION)
+        self.assertEqual(autoscaler.latest_version_ever_ready,
+                         constants.INITIAL_VERSION - 1)
+
+    def _route_spec(self, pool=False, use_ondemand_fallback=False,
+                    target_qps_per_replica=2.0):
+        return types.SimpleNamespace(
+            pool=pool,
+            use_ondemand_fallback=use_ondemand_fallback,
+            target_qps_per_replica=target_qps_per_replica)
+
+    def test_from_spec_forwards_version_request_rate(self):
+        spec = self._route_spec()
+        with mock.patch.object(autoscalers,
+                               'RequestRateAutoscaler') as mock_cls:
+            autoscalers.Autoscaler.from_spec('svc', spec, version=7)
+        mock_cls.assert_called_once_with('svc', spec, 7)
+
+    def test_from_spec_forwards_version_queue_length(self):
+        spec = self._route_spec(pool=True)
+        with mock.patch.object(autoscalers,
+                               'QueueLengthAutoscaler') as mock_cls:
+            autoscalers.Autoscaler.from_spec('svc', spec, version=7)
+        mock_cls.assert_called_once_with('svc', spec, 7)
+
+    def test_from_spec_forwards_version_fallback(self):
+        spec = self._route_spec(use_ondemand_fallback=True)
+        with mock.patch.object(autoscalers,
+                               'FallbackRequestRateAutoscaler') as mock_cls:
+            autoscalers.Autoscaler.from_spec('svc', spec, version=7)
+        mock_cls.assert_called_once_with('svc', spec, 7)
+
+    def test_from_spec_forwards_version_instance_aware(self):
+        spec = self._route_spec(target_qps_per_replica={'A100': 2.0})
+        with mock.patch.object(
+                autoscalers,
+                'InstanceAwareRequestRateAutoscaler') as mock_cls:
+            autoscalers.Autoscaler.from_spec('svc', spec, version=7)
+        mock_cls.assert_called_once_with('svc', spec, 7)
+
+    def test_from_spec_defaults_to_initial_version(self):
+        spec = self._route_spec()
+        with mock.patch.object(autoscalers,
+                               'RequestRateAutoscaler') as mock_cls:
+            autoscalers.Autoscaler.from_spec('svc', spec)
+        mock_cls.assert_called_once_with('svc', spec, constants.INITIAL_VERSION)
+
+    def test_controller_passes_recovered_version_to_autoscaler(self):
+        # Regression for the actual bug boundary: SkyServeController must hand
+        # the recovered service version to the autoscaler factory (not drop it),
+        # so a controller rebuilt on restart at version >= 2 doesn't churn.
+        from sky.serve import controller as serve_controller
+        with mock.patch.object(serve_controller.replica_managers,
+                               'SkyPilotReplicaManager'), \
+             mock.patch.object(serve_controller.autoscalers.Autoscaler,
+                               'from_spec') as mock_from_spec:
+            serve_controller.SkyServeController('svc',
+                                                mock.MagicMock(),
+                                                version=7,
+                                                host='localhost',
+                                                port=8000)
+        mock_from_spec.assert_called_once()
+        # version is the 3rd positional arg (service_name, service_spec, version)
+        assert mock_from_spec.call_args.args[2] == 7
 
 
 if __name__ == '__main__':
