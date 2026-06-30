@@ -12,6 +12,7 @@ import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy import orm
 
+from sky.serve import constants as serve_constants
 from sky.serve import serve_state
 
 
@@ -87,6 +88,106 @@ class TestAddServiceWritesControllerIp:
         # And the row is unchanged.
         record = _read_row(_mock_serve_db, 'svc3')
         assert record['controller_ip'] == '10.0.0.7'
+
+
+def _add_atomic_service(name: str, version=serve_constants.INITIAL_VERSION):
+    """Register a service + its initial version atomically (the new helper)."""
+    return serve_state.add_service_with_initial_version(
+        name=name,
+        controller_job_id=1,
+        policy='policy',
+        requested_resources_str='1x[CPU:1+]',
+        load_balancing_policy='round_robin',
+        status=serve_state.ServiceStatus.CONTROLLER_INIT,
+        tls_encrypted=False,
+        pool=False,
+        controller_pid=12345,
+        entrypoint='entry',
+        version=version,
+        # `spec` is only ever pickled, never type-checked at this layer (mirrors
+        # how add_or_update_version is exercised elsewhere in this file).
+        spec='spec-1',
+        yaml_content='yaml: v1',
+        controller_ip='10.0.0.7',
+    )
+
+
+class TestAddServiceWithInitialVersion:
+    """First-run registration must write the `services` row and its initial
+    `version_specs` row atomically. The two-write path (add_service then
+    add_or_update_version) had a crash window that stranded a `services` row
+    with no version row -- invisible to the latest-version INNER JOIN, so it
+    could never be recovered, removed, or have its name reused."""
+
+    def test_service_is_visible_via_join(self, _mock_serve_db):
+        # The whole point: after the atomic write, the service is reachable
+        # through get_service_from_name (which INNER-JOINs version_specs).
+        assert _add_atomic_service('svc-atomic') is True
+        record = serve_state.get_service_from_name('svc-atomic')
+        assert record is not None
+        assert record['controller_ip'] == '10.0.0.7'
+
+    def test_writes_initial_version_row(self, _mock_serve_db):
+        _add_atomic_service('svc-ver')
+        assert (serve_state.get_latest_version('svc-ver') ==
+                serve_constants.INITIAL_VERSION)
+        assert serve_state.get_yaml_content(
+            'svc-ver', serve_constants.INITIAL_VERSION) == 'yaml: v1'
+
+    def test_returns_false_on_duplicate(self, _mock_serve_db):
+        assert _add_atomic_service('svc-dup') is True
+        # Preserve add_service's contract: a duplicate name returns False so
+        # up() can short-circuit, and must not write a second version row.
+        assert _add_atomic_service('svc-dup') is False
+        with orm.Session(_mock_serve_db) as session:
+            versions = session.execute(
+                sqlalchemy.select(
+                    serve_state.version_specs_table.c.version).where(
+                        serve_state.version_specs_table.c.service_name ==
+                        'svc-dup')).fetchall()
+        assert len(versions) == 1
+
+    def test_atomic_write_is_all_or_nothing(self, _mock_serve_db):
+        # Regression contrast: a bare `add_service` (the old first step) leaves
+        # a row that get_service_from_name cannot see -- the exact stranded
+        # orphan the atomic helper prevents.
+        _add_minimal_service('svc-bare')
+        assert _read_row(_mock_serve_db, 'svc-bare') is not None  # row exists
+        assert serve_state.get_service_from_name('svc-bare') is None  # invisible
+
+        # The atomic helper never produces that half-state.
+        _add_atomic_service('svc-whole')
+        assert serve_state.get_service_from_name('svc-whole') is not None
+
+    def test_rolls_back_services_row_if_version_insert_fails(
+            self, _mock_serve_db):
+        # Pre-seed a conflicting initial version row (with no services row), so
+        # the version insert inside the atomic write hits a duplicate-PK error.
+        # A version_specs conflict is not the services-name uniqueness the
+        # helper converts to False, so the call raises -- but the services
+        # insert in the SAME transaction must still roll back. The whole point
+        # is that a failure can never leave the half-written orphan (a services
+        # row with no version row).
+        serve_state.add_or_update_version('svc-rollback',
+                                          serve_constants.INITIAL_VERSION,
+                                          'spec', 'yaml: v1')
+        assert _read_row(_mock_serve_db, 'svc-rollback') is None  # no svc row
+
+        with pytest.raises(RuntimeError):
+            _add_atomic_service('svc-rollback')
+
+        # The services insert was rolled back: still no services row, so the
+        # name is not wedged and no invisible orphan was created.
+        assert _read_row(_mock_serve_db, 'svc-rollback') is None
+
+    def test_get_service_pool_from_db_sees_bare_row(self, _mock_serve_db):
+        # The raw-pool accessor must read a version-less row (the orphan case)
+        # that get_service_from_name's inner join hides -- this is what gates
+        # the mode-scoped `down --purge` cleanup of such an orphan.
+        _add_minimal_service('svc-bare-pool')  # no version row -> orphan
+        assert serve_state.get_service_from_name('svc-bare-pool') is None
+        assert serve_state.get_service_pool_from_db('svc-bare-pool') is False
+        assert serve_state.get_service_pool_from_db('never-existed') is None
 
 
 class TestGetServiceFromNameReturnsControllerIp:

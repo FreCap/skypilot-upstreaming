@@ -347,6 +347,75 @@ def add_service(name: str,
     return True
 
 
+def add_service_with_initial_version(
+        name: str,
+        controller_job_id: int,
+        policy: str,
+        requested_resources_str: str,
+        load_balancing_policy: str,
+        status: ServiceStatus,
+        tls_encrypted: bool,
+        pool: bool,
+        controller_pid: int,
+        entrypoint: str,
+        version: int,
+        spec: 'service_spec.SkyServiceSpec',
+        yaml_content: str,
+        controller_ip: Optional[str] = None) -> bool:
+    """Atomically register a new service and its initial version.
+
+    The `services` row and the initial `version_specs` row are written in a
+    single transaction. Writing them in two separate commits (as `add_service`
+    followed by `add_or_update_version`) leaves a crash window in which a
+    `services` row exists with no `version_specs` row; the latest-version inner
+    join (`_build_services_with_latest_version_query`) then hides that service
+    from status, recovery and teardown, and the duplicate name blocks re-`up`.
+
+    Returns:
+        True if the service is added successfully, False if the service already
+        exists.
+    """
+    engine = _db_manager.get_engine()
+    try:
+        with orm.Session(engine) as session:
+            if engine.dialect.name == db_utils.SQLAlchemyDialect.SQLITE.value:
+                insert_func = sqlite.insert
+            elif (engine.dialect.name ==
+                  db_utils.SQLAlchemyDialect.POSTGRESQL.value):
+                insert_func = postgresql.insert
+            else:
+                raise ValueError('Unsupported database dialect')
+
+            session.execute(
+                insert_func(services_table).values(
+                    name=name,
+                    controller_job_id=controller_job_id,
+                    status=status.value,
+                    policy=policy,
+                    requested_resources_str=requested_resources_str,
+                    load_balancing_policy=load_balancing_policy,
+                    tls_encrypted=int(tls_encrypted),
+                    pool=int(pool),
+                    controller_pid=controller_pid,
+                    controller_ip=controller_ip,
+                    hash=str(uuid.uuid4()),
+                    entrypoint=entrypoint))
+            session.execute(
+                insert_func(version_specs_table).values(
+                    service_name=name,
+                    version=version,
+                    spec=pickle.dumps(spec),
+                    yaml_content=yaml_content))
+            session.commit()
+
+    except sqlalchemy_exc.IntegrityError as e:
+        for msg in _UNIQUE_CONSTRAINT_FAILED_ERROR_MSGS:
+            if msg in str(e):
+                return False
+        raise RuntimeError('Unexpected database error') from e
+    return True
+
+
 def update_service_controller_pid(service_name: str,
                                   controller_pid: int) -> None:
     """Updates the controller pid of a service.
@@ -636,6 +705,22 @@ def get_glob_service_names(
                             service_name.replace('*', '%')))).fetchall()
                 rows.extend(pattern_rows)
     return list({row[0] for row in rows})
+
+
+def get_service_pool_from_db(service_name: str) -> Optional[bool]:
+    """Reads the raw `pool` flag for a service straight from the services row.
+
+    Unlike `get_service_from_name`, this does NOT inner-join `version_specs`,
+    so it still returns a value for a `services` row that has no version row
+    (an orphan stranded by an interrupted first-run registration). Returns
+    None if no row exists for `service_name`.
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        row = session.execute(
+            sqlalchemy.select(services_table.c.pool).where(
+                services_table.c.name == service_name)).fetchone()
+    return bool(row[0]) if row is not None else None
 
 
 # === Replica functions ===

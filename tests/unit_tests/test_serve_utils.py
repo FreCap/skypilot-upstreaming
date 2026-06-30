@@ -473,6 +473,50 @@ class TestTerminateShuttingDownPurge:
             mock_purge.assert_not_called()
 
 
+class TestTerminateOrphanedServiceRowPurge:
+    """A `services` row with no `version_specs` row (an interrupted first-run
+    registration) is invisible to the latest-version join, so
+    `_get_service_status` returns None. `--purge` must clean it up -- but only
+    when the raw row belongs to the requested mode, since `_get_service_status`
+    also returns None for a healthy service of the *other* mode."""
+
+    def _run(self, *, purge, raw_pool, requested_pool):
+        with mock.patch('sky.serve.serve_utils.serve_state.'
+                        'get_glob_service_names',
+                        return_value=['svc']), \
+             mock.patch('sky.serve.serve_utils._get_service_status',
+                        return_value=None), \
+             mock.patch('sky.serve.serve_utils.serve_state.'
+                        'get_service_pool_from_db',
+                        return_value=raw_pool), \
+             mock.patch('sky.serve.serve_utils._terminate_failed_services',
+                        return_value=None) as mock_purge:
+            serve_utils.terminate_services(['svc'],
+                                           purge=purge,
+                                           pool=requested_pool)
+        return mock_purge
+
+    def test_purges_orphan_of_requested_mode(self):
+        mock_purge = self._run(purge=True, raw_pool=False, requested_pool=False)
+        mock_purge.assert_called_once()
+        # Called with a None status (no version row -> no real status).
+        assert mock_purge.call_args[0] == ('svc', None)
+
+    def test_does_not_purge_wrong_mode_row(self):
+        # raw row is a jobs-pool (pool=True) but the command is `serve down`
+        # (pool=False): must NOT be removed by the wrong mode.
+        mock_purge = self._run(purge=True, raw_pool=True, requested_pool=False)
+        mock_purge.assert_not_called()
+
+    def test_does_not_purge_when_row_absent(self):
+        mock_purge = self._run(purge=True, raw_pool=None, requested_pool=False)
+        mock_purge.assert_not_called()
+
+    def test_no_purge_leaves_orphan_untouched(self):
+        mock_purge = self._run(purge=False, raw_pool=False, requested_pool=False)
+        mock_purge.assert_not_called()
+
+
 class TestPoolStatusBatchedQuery:
     """`_get_service_status(pool=True)` must batch its per-replica job lookups
     into a single grouped query. The previous per-replica fan-out scaled with
