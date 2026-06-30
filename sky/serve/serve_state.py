@@ -850,6 +850,56 @@ def get_latest_version(service_name: str) -> Optional[int]:
     return result[0] if result else None
 
 
+def get_latest_committed_version(service_name: str) -> Optional[int]:
+    """Returns the latest version whose yaml was fully committed.
+
+    `add_version` inserts a placeholder row (spec=pickle.dumps(None),
+    yaml_content=NULL) and only later does `add_or_update_version` fill in the
+    real spec/yaml. A restart in that window can leave such a placeholder as
+    MAX(version). Recovery must skip it and resume the latest version that
+    actually has its yaml persisted -- booting a controller at a NULL-yaml
+    version crash-loops it (SkyPilotReplicaManager asserts yaml is not None).
+    Returns None if no version has committed yaml yet.
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        result = session.execute(
+            sqlalchemy.select(
+                sqlalchemy.func.max(version_specs_table.c.version)).where(
+                    sqlalchemy.and_(
+                        version_specs_table.c.service_name == service_name,
+                        version_specs_table.c.yaml_content.isnot(
+                            None)))).fetchone()
+    return result[0] if result else None
+
+
+def delete_uncommitted_versions(service_name: str, newer_than: int) -> None:
+    """Deletes placeholder version rows (NULL yaml) ABOVE a committed version.
+
+    A NULL-yaml row above the recovered committed version is a placeholder left
+    behind by an `add_version` whose follow-up `add_or_update_version` never ran
+    (e.g. a `sky serve update` interrupted by a restart before the controller
+    persisted the new yaml). Removing it keeps MAX(version) pointing at a real
+    version, so a subsequent update gets a clean MAX(version)+1 and recovery is
+    never wedged by it again.
+
+    Scoped to `version > newer_than` (the recovered committed version) on
+    purpose: it must NOT touch the version being booted, nor legitimate older
+    records that predate yaml-in-DB (those have NULL yaml but are <= the
+    committed version). Only safe to call when no update is in flight (e.g.
+    during controller recovery).
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        session.execute(
+            sqlalchemy.delete(version_specs_table).where(
+                sqlalchemy.and_(
+                    version_specs_table.c.service_name == service_name,
+                    version_specs_table.c.yaml_content.is_(None),
+                    version_specs_table.c.version > newer_than)))
+        session.commit()
+
+
 def get_service_controller_port(service_name: str) -> int:
     """Gets the controller port of a service."""
     engine = _db_manager.get_engine()
