@@ -164,5 +164,65 @@ class TestOciS3CloudStorageCommands(unittest.TestCase):
         self.assertIn('--profile=oci', cmd)
 
 
+class TestOciStoreDeleteGuard(unittest.TestCase):
+    """Native ``OciStore.delete()`` must remove only the mounted sub-path for a
+    user-provided (non-Sky-managed) bucket -- never the whole, user-owned
+    bucket. This mirrors the guard every other store already has."""
+
+    def _make_oci_store(self, *, sub_path, is_sky_managed):
+        store = storage_lib.OciStore.__new__(storage_lib.OciStore)
+        store.name = 'user-bucket'
+        store.namespace = 'ns'
+        store.region = 'us-sanjose-1'
+        store._bucket_sub_path = sub_path  # pylint: disable=protected-access
+        store.is_sky_managed = is_sky_managed
+        return store
+
+    def _run_delete(self, store):
+        # Do NOT mask `with_oci_env`: it returns the real `&&`-joined shell
+        # command, so the test exercises the actual command shape (the
+        # sub-path delete must run that string through a shell, not split it).
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               return_value=b'') as mock_run:
+            store.delete()
+        cmd = mock_run.call_args[0][0]
+        # The sub-path delete passes a shell string (shell=True); the
+        # whole-bucket delete passes a split argv list.
+        return cmd if isinstance(cmd, str) else ' '.join(cmd)
+
+    def test_user_bucket_sub_path_deletes_only_prefix(self):
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        cmd = self._run_delete(store)
+        # Only the per-run prefix is removed; the bucket is left intact.
+        self.assertIn('oci os object bulk-delete', cmd)
+        self.assertIn('--prefix run-123/', cmd)
+        self.assertIn('--bucket-name user-bucket', cmd)
+        self.assertNotIn('oci os bucket delete', cmd)
+
+    def test_sky_managed_bucket_deletes_whole_bucket(self):
+        # A Sky-managed intermediate bucket is ours to delete entirely.
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=True)
+        cmd = self._run_delete(store)
+        self.assertIn('oci os bucket delete', cmd)
+
+    def test_no_sub_path_deletes_whole_bucket(self):
+        store = self._make_oci_store(sub_path=None, is_sky_managed=False)
+        cmd = self._run_delete(store)
+        self.assertIn('oci os bucket delete', cmd)
+
+    def test_sub_path_delete_runs_through_a_shell(self):
+        # with_oci_env returns a '&&'-joined shell string (venv setup + source +
+        # the oci call), so the sub-path delete must run it with shell=True, not
+        # split it into argv.
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               return_value=b'') as mock_run:
+            store.delete()
+        self.assertIs(mock_run.call_args.kwargs.get('shell'), True)
+        self.assertIsInstance(mock_run.call_args.args[0], str)
+
+
 if __name__ == '__main__':
     unittest.main()
