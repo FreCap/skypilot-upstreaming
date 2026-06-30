@@ -48,6 +48,17 @@ try:
 except ValueError:
     _WAIT_REQUESTS_TIMEOUT_SECONDS = 60
 
+# Reserve a margin before the SIGKILL deadline so the final "interrupt all
+# on-going requests for retry" sweep -- the only path that flags non-retriable
+# requests (sky.launch / sky.exec / sky.jobs.launch / ...) with should_retry --
+# actually runs and its DB writes commit before the worker is hard-killed.
+# The Helm chart wires terminationGracePeriodSeconds (the SIGKILL deadline) to
+# the same value as this timeout, so without a margin the sweep fires at
+# ~T+timeout, i.e. no earlier than SIGKILL, and those requests are silently
+# dropped on restart instead of being retried by the client.
+_INTERRUPT_BEFORE_SHUTDOWN_DEADLINE_SECONDS = (2 *
+                                               _WAIT_REQUESTS_INTERVAL_SECONDS)
+
 # TODO(aylei): use decorator to register requests that need to be proactively
 # cancelled instead of hardcoding here.
 _RETRIABLE_REQUEST_NAMES = {
@@ -100,6 +111,9 @@ class Server(uvicorn.Server):
         super().__init__(config=config)
         self.exiting: bool = False
         self.max_db_connections = max_db_connections
+        # Monotonic time at which the first shutdown signal arrived; used to
+        # budget the on-going-request wait against the real SIGKILL deadline.
+        self._shutdown_started_at: Optional[float] = None
 
     def handle_exit(self, sig: int, frame: Union[FrameType, None]) -> None:
         """Handle exit signal.
@@ -117,6 +131,11 @@ class Server(uvicorn.Server):
             return
         if not self.exiting:
             self.exiting = True
+            # Capture the true signal-arrival time so _wait_requests budgets
+            # its timeout against the real shutdown start (and thus the k8s
+            # SIGKILL deadline), not against the later moment the elected
+            # coordinator reaches _wait_requests after the grace sleeps + lock.
+            self._shutdown_started_at = time.monotonic()
             # Perform graceful shutdown in a separate thread to avoid blocking
             # the main thread.
             threading.Thread(target=self._graceful_shutdown,
@@ -150,7 +169,15 @@ class Server(uvicorn.Server):
 
     def _wait_requests(self) -> None:
         """Wait until all on-going requests are finished or cancelled."""
-        start_time = time.time() - _GRACE_WAIT_SECONDS
+        # Budget the final interrupt sweep against the true shutdown start
+        # (captured in handle_exit when SIGTERM arrived), reserving a margin
+        # before the SIGKILL deadline so the sweep -- and its should_retry DB
+        # writes -- complete before the worker is killed. Falls back to "now"
+        # if _wait_requests is somehow reached without a recorded start.
+        shutdown_started_at = self._shutdown_started_at or time.monotonic()
+        interrupt_deadline = shutdown_started_at + max(
+            0, _WAIT_REQUESTS_TIMEOUT_SECONDS -
+            _INTERRUPT_BEFORE_SHUTDOWN_DEADLINE_SECONDS)
         while True:
             requests = (request_storage.get_request_backend().
                         get_shutdown_active_requests())
@@ -163,7 +190,7 @@ class Server(uvicorn.Server):
             internal_request_ids = {
                 d.id for d in daemons.INTERNAL_REQUEST_DAEMONS
             }
-            if time.time() - start_time > _WAIT_REQUESTS_TIMEOUT_SECONDS:
+            if time.monotonic() >= interrupt_deadline:
                 logger.warning('Timeout waiting for on-going requests to '
                                'finish, cancelling all on-going requests.')
                 for request_id, _ in requests:
