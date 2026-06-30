@@ -507,10 +507,14 @@ def _respawn_controller_and_lb(
     cleanup. The OLD load balancer is left running until the new controller is
     confirmed, so the data plane is not dropped during retries.
     """
-    # Reload the latest version + spec so a respawn after /update_service uses
-    # the current config (fall back to captured values on a DB error).
+    # Reload the latest COMMITTED version + spec so a respawn after
+    # /update_service uses the current config (fall back to captured values on a
+    # DB error). Use the committed version, not raw MAX(version): an interrupted
+    # `sky serve update` can leave a NULL-yaml placeholder as MAX whose spec is
+    # None, which would otherwise drop us back to the stale captured parent
+    # version/spec instead of the latest fully-committed version.
     try:
-        latest = serve_state.get_latest_version(service_name)
+        latest = serve_state.get_latest_committed_version(service_name)
         if latest is not None:
             spec = serve_state.get_spec(service_name, latest)
             if spec is not None:
@@ -634,9 +638,24 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         with open(os.path.expanduser(yaml_path), 'r', encoding='utf-8') as f:
             return f.read()
 
+    # On recovery, resume the latest COMMITTED service version (one whose yaml
+    # was persisted), NOT raw MAX(version). An interrupted `sky serve update`
+    # can leave a NULL-yaml placeholder version as MAX (add_version writes the
+    # row before the controller fills in the yaml via add_or_update_version);
+    # booting the controller at it crash-loops forever (SkyPilotReplicaManager
+    # asserts the yaml is not None). The interrupted update is unrecoverable
+    # (its yaml was never persisted), so resume the last committed version.
+    recovery_version = (serve_state.get_latest_committed_version(service_name)
+                        if is_recovery else None)
+
     if is_recovery:
         assert service is not None
-        yaml_content = service['yaml_content']
+        if recovery_version is not None:
+            yaml_content = serve_state.get_yaml_content(service_name,
+                                                        recovery_version)
+        else:
+            # No committed version yet; fall back to the joined record.
+            yaml_content = service['yaml_content']
         # Backward compatibility for old service records that
         # does not dump the yaml content to version database.
         # TODO(tian): Remove this after 2 minor releases, i.e. 0.13.0.
@@ -706,10 +725,30 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         serve_state.add_or_update_version(service_name, version, service_spec,
                                           yaml_content)
     else:
-        latest_version = serve_state.get_latest_version(service_name)
-        if latest_version is None:
-            raise ValueError(f'No version found for service {service_name}')
-        version = latest_version
+        # Use the latest COMMITTED version (computed above), not raw
+        # MAX(version), so an interrupted-update NULL-yaml placeholder does not
+        # wedge the controller on boot.
+        if recovery_version is not None:
+            version = recovery_version
+            # Drop orphan placeholder versions (NULL yaml) left ABOVE the
+            # committed version by an interrupted update, so a later
+            # `sky serve update` gets a clean MAX(version)+1 and recovery is
+            # never wedged by them again. Scoped to > version so it can never
+            # delete the version we are about to boot, nor legitimate older
+            # records that predate yaml-in-DB. Safe here: the API server just
+            # restarted, so no update is in flight.
+            serve_state.delete_uncommitted_versions(service_name,
+                                                    newer_than=version)
+        else:
+            # Nothing committed yet (e.g. an old record that predates
+            # yaml-in-DB, recovered via the tmp-yaml fallback above). Fall back
+            # to raw latest and do NOT sweep -- the version we boot has no
+            # committed yaml of its own, so deleting NULL-yaml rows could remove
+            # it.
+            version = serve_state.get_latest_version(service_name)
+            if version is None:
+                raise ValueError(
+                    f'No version found for service {service_name}')
         # Pre-claim controller_pid immediately so the next
         # ha_recovery_for_consolidation_mode iteration sees our _start
         # process as the live controller and does NOT fire a duplicate
