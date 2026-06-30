@@ -5,7 +5,6 @@ Responsible for autoscaling and replica management.
 import contextlib
 import logging
 import os
-import threading
 import time
 import traceback
 from typing import Any, Dict, List
@@ -24,6 +23,7 @@ from sky.serve import serve_utils
 from sky.skylet import constants
 from sky.utils import common_utils
 from sky.utils import context_utils
+from sky.utils import thread_utils
 from sky.utils import ux_utils
 
 logger = sky_logging.init_logger(__name__)
@@ -277,7 +277,11 @@ class SkyServeController:
                 },
             )
 
-        threading.Thread(target=self._run_autoscaler).start()
+        # Supervised so a BaseException escaping the autoscaler loop (or the
+        # loop returning) does not silently stop all scaling decisions while
+        # the controller keeps serving HTTP -- it is restarted instead.
+        thread_utils.start_supervised_thread(self._run_autoscaler,
+                                             'autoscaler')
 
         logger.info('SkyServe Controller started on '
                     f'http://{self._host}:{self._port}. PID: {os.getpid()}')
