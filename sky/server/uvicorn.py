@@ -188,6 +188,19 @@ class Server(uvicorn.Server):
         with requests_lib.update_request(request_id) as req:
             if req is None:
                 return
+            # A request can finish between the snapshot taken in
+            # `_wait_requests` and this call. Every other kill-path
+            # (`_should_kill_request`, `kill_request_async`,
+            # `set_request_cancelled_async`) skips a request whose status is
+            # already terminal; mirror that here. Without the guard we would
+            # (a) overwrite a SUCCEEDED/FAILED result with CANCELLED +
+            # should_retry -- losing the recorded return value and making the
+            # client re-run an operation that already completed -- and
+            # (b) SIGTERM a stale `pid`: finished requests do not clear `pid`
+            # and the worker pool reuses PIDs, so the signal could hit an
+            # unrelated in-flight request.
+            if req.status > requests_lib.RequestStatus.RUNNING:
+                return
             if req.pid is not None:
                 try:
                     os.kill(req.pid, signal.SIGTERM)
