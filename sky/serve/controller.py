@@ -286,7 +286,23 @@ class SkyServeController:
         logger.info('SkyServe Controller started on '
                     f'http://{self._host}:{self._port}. PID: {os.getpid()}')
 
-        uvicorn.run(self._app, host=self._host, port=self._port)
+        try:
+            uvicorn.run(self._app, host=self._host, port=self._port)
+        finally:
+            # If uvicorn.run() ever returns (a clean shutdown, a child-only
+            # SIGINT raising KeyboardInterrupt, or any other exit), the HTTP
+            # control plane is dead but the supervised control-loop threads
+            # (autoscaler, replica refresher/prober/status-fetcher) are
+            # non-daemon and loop forever, so the interpreter cannot exit and
+            # the process lingers. The parent `_start` watchdog respawns the
+            # controller only when `controller_process.is_alive()` is False,
+            # so a lingering process is never respawned and the service is
+            # stuck with no working controller. Hard-exit so the parent
+            # observes the death and respawns on a fresh port.
+            logger.error('SkyServe Controller uvicorn server exited; '
+                         'terminating the subprocess so the parent can '
+                         'respawn the controller.')
+            os._exit(1)  # pylint: disable=protected-access
 
 
 # TODO(tian): Probably we should support service that will stop the VM in
