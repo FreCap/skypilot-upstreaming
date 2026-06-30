@@ -11,7 +11,7 @@ import socket
 import sys
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import filelock
 
@@ -35,6 +35,9 @@ from sky.utils import controller_utils
 from sky.utils import subprocess_utils
 from sky.utils import thread_utils
 from sky.utils import ux_utils
+
+if TYPE_CHECKING:
+    from sky.serve import service_spec as service_spec_lib
 
 # Use the explicit logger name so that the logger is under the
 # `sky.serve.service` namespace when executed directly, so as
@@ -60,6 +63,15 @@ def _handle_signal(service_name: str) -> None:
                     logger.warning(
                         f'Unknown signal received: {user_signal}. Ignoring.')
                     user_signal = None
+            if user_signal is not None:
+                # Persist the teardown intent BEFORE consuming the signal so a
+                # crash in this window cannot resurrect the service: HA recovery
+                # then sees either SHUTTING_DOWN (and resumes teardown) or the
+                # still-present signal (and re-fires terminate) -- never a
+                # downed service that comes back up serving. (Only TERMINATE
+                # exists.)
+                serve_state.set_service_status_and_active_versions(
+                    service_name, serve_state.ServiceStatus.SHUTTING_DOWN)
             # Remove the signal file, after reading it.
             signal_file.unlink()
     if user_signal is None:
@@ -142,9 +154,9 @@ def _cleanup(service_name: str, pool: bool) -> bool:
     """Clean up all service related resources, i.e. replicas and storage."""
     # Log who we are and what DB state we're cleaning up, so post-mortems
     # can correlate this with concurrent ha_recovery activity. _cleanup is
-    # destructive (it deletes the HA recovery script on the very next line
-    # and may delete the entire service row at the end), so an audit trail
-    # is worth a few WARN lines.
+    # destructive (it tears down replicas and, at the very end, deletes the
+    # HA recovery script and may delete the entire service row), so an audit
+    # trail is worth a few WARN lines.
     own_pid = os.getpid()
     try:
         svc_dbg = serve_state.get_service_from_name(service_name)
@@ -160,10 +172,14 @@ def _cleanup(service_name: str, pool: bool) -> bool:
         logger.warning(
             f'_cleanup entered for service {service_name} '
             f'(own_pid={own_pid}, db row not found — already removed?)')
-    # Cleanup the HA recovery script first as it is possible that some error
-    # was raised when we construct the task object (e.g.,
-    # sky.exceptions.ResourcesUnavailableError).
-    serve_state.remove_ha_recovery_script(service_name)
+    # NOTE: the HA recovery script is removed at the END of _cleanup (after
+    # replica teardown), NOT here. Removing it up-front opened a window where a
+    # controller-pod kill mid-teardown (HA pod move / node drain) left a durable
+    # service row with NO recovery script — ha_recovery_for_consolidation_mode
+    # then logs 'recovery script does not exist. Skipping recovery' forever and
+    # strands the service with replicas still consuming resources. Keeping the
+    # script until all destructive teardown finishes lets recovery re-run
+    # _cleanup if we die partway. See the removal at the end of this function.
     failed = False
     replica_infos = serve_state.get_replica_infos(service_name)
     info2thr: Dict[replica_managers.ReplicaInfo,
@@ -254,6 +270,15 @@ def _cleanup(service_name: str, pool: bool) -> bool:
     versions = serve_state.get_service_versions(service_name)
     if not all(map(cleanup_version_storage, versions)):
         failed = True
+
+    # All destructive teardown above is done; only now is it safe to drop the
+    # HA recovery script. If we had been killed partway through teardown the
+    # script would have survived, letting ha_recovery_for_consolidation_mode
+    # respawn the controller and re-run _cleanup instead of stranding the
+    # service. On the success path the caller's remove_service_completely also
+    # deletes it (idempotent); on the FAILED_CLEANUP path removing it here
+    # avoids a recovery loop on a cleanup that already ran to completion.
+    serve_state.remove_ha_recovery_script(service_name)
 
     # NOTE: do not delete version_specs here. The success path in `_start`
     # deletes them along with `remove_service`. Deleting them on failure
@@ -380,6 +405,67 @@ def _bail_on_boot_failure(service_name: str,
     os._exit(1)  # pylint: disable=protected-access
 
 
+def _should_resume_teardown(is_recovery: bool,
+                            service: Optional[Dict[str, Any]]) -> bool:
+    """Whether a recovery run should resume teardown instead of serving.
+
+    A controller that died mid-teardown left the service in a teardown status
+    (SHUTTING_DOWN from a user `down`, or FAILED_CLEANUP from a prior failed
+    attempt). Bringing it back up would resurrect a service the user tore down,
+    so recovery must instead finish the cleanup. A controller that died for any
+    other reason left a non-teardown status (e.g. READY) and is recovered
+    normally (brought back up).
+    """
+    return (is_recovery and service is not None and service['status'] in (
+        serve_state.ServiceStatus.SHUTTING_DOWN,
+        serve_state.ServiceStatus.FAILED_CLEANUP))
+
+
+def _run_cleanup_and_finalize(service_name: str,
+                              service_spec: 'service_spec_lib.SkyServiceSpec',
+                              service_dir: str, job_id: int) -> None:
+    """Run ``_cleanup`` and finalize the service's DB / dir state.
+
+    Shared by ``_start``'s teardown ``finally`` and the recovery-resume path (a
+    controller that died mid-teardown). On failure the service is left
+    FAILED_CLEANUP so an operator can ``--purge``; on success the service row
+    and working dir are removed.
+    """
+    try:
+        failed = _cleanup(service_name, service_spec.pool)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error(f'Failed to clean up service {service_name}: {e}')
+        with ux_utils.enable_traceback():
+            logger.error(f'  Traceback: {traceback.format_exc()}')
+        failed = True
+        # _cleanup raised before its own end-of-function script removal, so the
+        # HA recovery script is still present. Remove it here: FAILED_CLEANUP is
+        # a teardown status that _should_resume_teardown resumes, so leaving the
+        # script would make HA recovery re-run cleanup and hit the same error
+        # forever. (A PROCESS death before this handler never runs this line, so
+        # the script is preserved for that case -- which is what we want.)
+        try:
+            serve_state.remove_ha_recovery_script(service_name)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    if failed:
+        serve_state.set_service_status_and_active_versions(
+            service_name, serve_state.ServiceStatus.FAILED_CLEANUP)
+        logger.error(f'Service {service_name} failed to clean up.')
+    else:
+        serve_state.remove_service_completely(service_name)
+        try:
+            shutil.rmtree(service_dir)
+        except FileNotFoundError:
+            # The service_dir may already be gone (e.g. the controller's own
+            # success path raced with a purge).
+            pass
+        logger.info(f'Service {service_name} terminated successfully.')
+
+    _cleanup_task_run_script(job_id)
+
+
 def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
     """Starts the service.
     This including the controller and load balancer.
@@ -415,6 +501,19 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
 
     service_dir = os.path.expanduser(
         serve_utils.generate_remote_service_dir_name(service_name))
+
+    # If the previous controller died mid-teardown, its HA recovery script was
+    # preserved (see _cleanup, which now removes the script only AFTER
+    # teardown). Bringing the controller + LB back up here would resurrect a
+    # service the user tore down -- so resume the unfinished cleanup instead.
+    if _should_resume_teardown(is_recovery, service):
+        assert service is not None
+        logger.info(f'Recovering service {service_name} in status '
+                    f'{service["status"].value}: resuming teardown instead of '
+                    'serving.')
+        _run_cleanup_and_finalize(service_name, service_spec, service_dir,
+                                  job_id)
+        return
 
     # Pod IP for HA leader-aware routing.
     pod_ip: Optional[str] = os.environ.get('POD_IP')
@@ -684,34 +783,13 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         for process in process_to_kill:
             process.join()
 
-        # Catch any exception here to avoid it kill the service monitoring
-        # process. In which case, the service will not only fail to clean
-        # up, but also cannot be terminated in the future as no process
-        # will handle the user signal anymore. Instead, we catch any error
-        # and set it to FAILED_CLEANUP instead.
-        try:
-            failed = _cleanup(service_name, service_spec.pool)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(f'Failed to clean up service {service_name}: {e}')
-            with ux_utils.enable_traceback():
-                logger.error(f'  Traceback: {traceback.format_exc()}')
-            failed = True
-
-        if failed:
-            serve_state.set_service_status_and_active_versions(
-                service_name, serve_state.ServiceStatus.FAILED_CLEANUP)
-            logger.error(f'Service {service_name} failed to clean up.')
-        else:
-            serve_state.remove_service_completely(service_name)
-            try:
-                shutil.rmtree(service_dir)
-            except FileNotFoundError:
-                # The service_dir may already be gone (e.g. the controller's own
-                # success path raced with a purge).
-                pass
-            logger.info(f'Service {service_name} terminated successfully.')
-
-        _cleanup_task_run_script(job_id)
+        # Run cleanup + finalize. _run_cleanup_and_finalize catches any error
+        # from _cleanup and sets FAILED_CLEANUP instead, so the service can
+        # still be terminated later (a crash here would otherwise leave no
+        # process to handle the user signal). Shared with the recovery-resume
+        # path above.
+        _run_cleanup_and_finalize(service_name, service_spec, service_dir,
+                                  job_id)
 
 
 if __name__ == '__main__':
