@@ -116,6 +116,71 @@ def test_refresh_thread_pool_scans_budget_once_per_tick(monkeypatch, tmp_path):
     assert scans['terminating'] <= 1
 
 
+def test_down_admission_uses_hoisted_budget(monkeypatch, tmp_path):
+    """With K terminating replicas, the budget table is scanned O(1)."""
+    num_terminating = 20
+    replicas = {}
+    for rid in range(num_terminating):
+        info = _pending_replica(rid)
+        info.status_property.sky_down_status = (
+            common_utils.ProcessStatus.SCHEDULED)
+        replicas[rid] = info
+    scans = {'n': 0}
+
+    def _scan() -> int:
+        scans['n'] += 1
+        return 0
+
+    monkeypatch.setattr(serve_state, 'total_number_provisioning_replicas',
+                        _scan)
+    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas',
+                        _scan)
+    monkeypatch.setattr(serve_state, 'get_replica_info_from_id',
+                        lambda svc, rid: replicas[rid])
+    monkeypatch.setattr(serve_state, 'get_replica_infos',
+                        lambda svc: list(replicas.values()))
+    monkeypatch.setattr(
+        serve_state, 'add_or_update_replica',
+        lambda svc, rid, info: replicas.__setitem__(rid, info))
+    monkeypatch.setattr(controller_utils, '_get_request_parallelism',
+                        lambda pool: 10_000)
+    monkeypatch.setattr(controller_utils, 'get_resources_lock_path',
+                        lambda: str(tmp_path / 'resources.lock'))
+
+    mgr = _build_manager(num_launching=0)
+    mgr._down_thread_pool = {
+        rid: _NotStartedThread() for rid in range(num_terminating)
+    }
+    mgr._refresh_thread_pool()
+
+    assert all(t.started for t in mgr._down_thread_pool.values())
+    assert all(
+        info.status_property.sky_down_status == common_utils.ProcessStatus.
+        RUNNING for info in replicas.values())
+    # One in_flight_launch_count read = one scan of each of the two tables.
+    assert scans['n'] <= 2
+
+
+def test_idle_tick_performs_no_budget_scan(monkeypatch):
+    """A tick with nothing to admit must not scan the budget tables."""
+    scans = {'n': 0}
+
+    def _scan() -> int:
+        scans['n'] += 1
+        return 0
+
+    monkeypatch.setattr(serve_state, 'total_number_provisioning_replicas',
+                        _scan)
+    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas',
+                        _scan)
+    monkeypatch.setattr(serve_state, 'get_replica_infos', lambda svc: [])
+
+    mgr = _build_manager(num_launching=0)
+    mgr._refresh_thread_pool()
+
+    assert scans['n'] == 0
+
+
 def test_can_provision_with_precomputed_in_flight_skips_db_scan(monkeypatch):
     """can_provision/can_terminate must honor a pre-computed in_flight count
     without touching the (expensive) whole-table scan functions."""
