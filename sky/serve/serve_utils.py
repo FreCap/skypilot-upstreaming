@@ -1377,7 +1377,7 @@ def terminate_services(service_names: Optional[List[str]], purge: bool,
                     message = _terminate_failed_services(service_name, None)
                     if message is not None:
                         messages.append(message)
-                    terminated_service_names.append(service_name)
+                    terminated_service_names.append(f'{service_name!r}')
             continue
         if (service_status is not None and service_status['status']
                 == serve_state.ServiceStatus.SHUTTING_DOWN):
