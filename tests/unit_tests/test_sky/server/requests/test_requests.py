@@ -1537,6 +1537,35 @@ def test_encode_requests_various_statuses():
         assert result[i].status == status.value
 
 
+def test_encode_requests_readable_encode_parity():
+    """encode_requests and readable_encode must produce identical payloads.
+
+    Both feed the request table display (readable_encode delegates to
+    encode_requests); this locks in the shared field list, including
+    file_mounts_blob_id.
+    """
+    from sky import models
+
+    request = requests.Request(request_id='parity-req',
+                               name='parity-request',
+                               entrypoint=dummy,
+                               request_body=payloads.RequestBody(),
+                               status=RequestStatus.PENDING,
+                               created_at=time.time(),
+                               user_id='user-1',
+                               cluster_name='parity-cluster',
+                               file_mounts_blob_id='blob-123')
+
+    mock_user = models.User(id='user-1', name='Test User')
+    with mock.patch('sky.global_user_state.get_all_users',
+                    return_value=[mock_user]):
+        batched_payload = requests.encode_requests([request])[0]
+        per_row_payload = request.readable_encode()
+
+    assert batched_payload.file_mounts_blob_id == 'blob-123'
+    assert per_row_payload.model_dump() == batched_payload.model_dump()
+
+
 def test_update_request_row_fields_none_fields():
     """Test _update_request_row_fields with None fields returns row as-is."""
     original_row = ('req-1', 'test', 'entry', 'body', 'PENDING', 'ret', 'err',

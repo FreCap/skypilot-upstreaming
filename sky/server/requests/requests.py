@@ -282,29 +282,9 @@ class Request:
         sent to the client side, especially for the request table could include
         all the requests.
         """
-        assert isinstance(self.request_body,
-                          payloads.RequestBody), (self.name, self.request_body)
-        user = global_user_state.get_user(self.user_id)
-        user_name = user.name if user is not None else None
-        return payloads.RequestPayload(
-            request_id=self.request_id,
-            name=self.name,
-            entrypoint=self.entrypoint.__name__,
-            request_body=self.request_body.model_dump_json(),
-            status=_status_value_for_client(self.status.value),
-            return_value=orjson.dumps(None).decode('utf-8'),
-            error=orjson.dumps(None).decode('utf-8'),
-            pid=None,
-            created_at=self.created_at,
-            schedule_type=self.schedule_type.value,
-            user_id=self.user_id,
-            user_name=user_name,
-            cluster_name=self.cluster_name,
-            status_msg=self.status_msg,
-            should_retry=self.should_retry,
-            finished_at=self.finished_at,
-            file_mounts_blob_id=self.file_mounts_blob_id,
-        )
+        # Delegate to the batched encoder so the display field list lives in a
+        # single place and the two paths cannot drift apart.
+        return encode_requests([self])[0]
 
     def encode(self) -> payloads.RequestPayload:
         """Serialize the SkyPilot API request."""
@@ -448,9 +428,6 @@ def encode_requests(requests: List[Request]) -> List[payloads.RequestPayload]:
             status_msg=request.status_msg,
             should_retry=request.should_retry,
             finished_at=request.finished_at,
-            # Keep parity with Request.readable_encode (which sets this), so the
-            # by-id /api/status branch is field-identical after switching to the
-            # batched encoder.
             file_mounts_blob_id=request.file_mounts_blob_id,
         )
         encoded_requests.append(payload)
