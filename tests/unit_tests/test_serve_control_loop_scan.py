@@ -88,9 +88,8 @@ def test_refresh_thread_pool_scans_budget_once_per_tick(monkeypatch, tmp_path):
                         lambda svc, rid: replicas[rid])
     monkeypatch.setattr(serve_state, 'get_replica_infos',
                         lambda svc: list(replicas.values()))
-    monkeypatch.setattr(
-        serve_state, 'add_or_update_replica',
-        lambda svc, rid, info: replicas.__setitem__(rid, info))
+    monkeypatch.setattr(serve_state, 'add_or_update_replica',
+                        lambda svc, rid, info: replicas.__setitem__(rid, info))
     # Ample budget so every pending replica is allowed to launch; also avoids
     # the memory-probing path inside _get_request_parallelism.
     monkeypatch.setattr(controller_utils, '_get_request_parallelism',
@@ -103,9 +102,8 @@ def test_refresh_thread_pool_scans_budget_once_per_tick(monkeypatch, tmp_path):
 
     # Correctness preserved: every pending replica got launched...
     assert all(t.started for t in mgr._launch_thread_pool.values())
-    assert all(
-        info.status_property.sky_launch_status == common_utils.ProcessStatus.
-        RUNNING for info in replicas.values())
+    assert all(info.status_property.sky_launch_status ==
+               common_utils.ProcessStatus.RUNNING for info in replicas.values())
     # ...and the whole-table budget scan happened at most ONCE for the tick,
     # not once per launching replica (the O(K*N) bug -> would be num_launching).
     assert scans['provisioning'] <= 1, (
@@ -131,15 +129,13 @@ def test_down_admission_uses_hoisted_budget(monkeypatch, tmp_path):
 
     monkeypatch.setattr(serve_state, 'total_number_provisioning_replicas',
                         _scan)
-    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas',
-                        _scan)
+    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas', _scan)
     monkeypatch.setattr(serve_state, 'get_replica_info_from_id',
                         lambda svc, rid: replicas[rid])
     monkeypatch.setattr(serve_state, 'get_replica_infos',
                         lambda svc: list(replicas.values()))
-    monkeypatch.setattr(
-        serve_state, 'add_or_update_replica',
-        lambda svc, rid, info: replicas.__setitem__(rid, info))
+    monkeypatch.setattr(serve_state, 'add_or_update_replica',
+                        lambda svc, rid, info: replicas.__setitem__(rid, info))
     monkeypatch.setattr(controller_utils, '_get_request_parallelism',
                         lambda pool: 10_000)
     monkeypatch.setattr(controller_utils, 'get_resources_lock_path',
@@ -152,9 +148,8 @@ def test_down_admission_uses_hoisted_budget(monkeypatch, tmp_path):
     mgr._refresh_thread_pool()
 
     assert all(t.started for t in mgr._down_thread_pool.values())
-    assert all(
-        info.status_property.sky_down_status == common_utils.ProcessStatus.
-        RUNNING for info in replicas.values())
+    assert all(info.status_property.sky_down_status ==
+               common_utils.ProcessStatus.RUNNING for info in replicas.values())
     # One in_flight_launch_count read = one scan of each of the two tables.
     assert scans['n'] <= 2
 
@@ -169,8 +164,7 @@ def test_idle_tick_performs_no_budget_scan(monkeypatch):
 
     monkeypatch.setattr(serve_state, 'total_number_provisioning_replicas',
                         _scan)
-    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas',
-                        _scan)
+    monkeypatch.setattr(serve_state, 'total_number_terminating_replicas', _scan)
     monkeypatch.setattr(serve_state, 'get_replica_infos', lambda svc: [])
 
     mgr = _build_manager(num_launching=0)

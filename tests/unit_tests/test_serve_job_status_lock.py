@@ -48,7 +48,8 @@ def test_fetch_job_status_releases_lock_during_ssh(monkeypatch):
     monkeypatch.setattr(serve_state, 'get_replica_infos',
                         lambda svc: list(replicas))
     # Avoid the real cluster lookup / handle assertion.
-    monkeypatch.setattr(replica_managers.ReplicaInfo, 'handle',
+    monkeypatch.setattr(replica_managers.ReplicaInfo,
+                        'handle',
                         lambda self, cluster_record=None: object())
 
     ssh_entered = threading.Event()
@@ -99,7 +100,8 @@ def test_preemption_path_acts_on_fresh_replica_not_stale_snapshot(monkeypatch):
     stale = _tracked_replica(7)
     fresh = _tracked_replica(7)  # distinct object, same id
     monkeypatch.setattr(serve_state, 'get_replica_infos', lambda svc: [stale])
-    monkeypatch.setattr(replica_managers.ReplicaInfo, 'handle',
+    monkeypatch.setattr(replica_managers.ReplicaInfo,
+                        'handle',
                         lambda self, cluster_record=None: object())
     monkeypatch.setattr(replica_managers.backends.CloudVmRayBackend,
                         'get_job_status', _raise_command_error)
@@ -119,7 +121,8 @@ def test_preemption_path_skips_vanished_replica(monkeypatch):
     preemption path must skip it, not crash or act on the stale snapshot."""
     stale = _tracked_replica(9)
     monkeypatch.setattr(serve_state, 'get_replica_infos', lambda svc: [stale])
-    monkeypatch.setattr(replica_managers.ReplicaInfo, 'handle',
+    monkeypatch.setattr(replica_managers.ReplicaInfo,
+                        'handle',
                         lambda self, cluster_record=None: object())
     monkeypatch.setattr(replica_managers.backends.CloudVmRayBackend,
                         'get_job_status', _raise_command_error)
@@ -140,9 +143,10 @@ def test_walk_skips_replica_whose_cluster_record_vanished(monkeypatch):
     replicas = [_tracked_replica(1), _tracked_replica(2)]
     monkeypatch.setattr(serve_state, 'get_replica_infos',
                         lambda svc: list(replicas))
-    monkeypatch.setattr(
-        replica_managers.ReplicaInfo, 'handle', lambda self, cluster_record=None:
-        None if self.replica_id == 1 else object())
+    monkeypatch.setattr(replica_managers.ReplicaInfo,
+                        'handle',
+                        lambda self, cluster_record=None: None
+                        if self.replica_id == 1 else object())
 
     probed = []
 
@@ -166,12 +170,13 @@ def test_user_failure_path_skips_replica_scheduled_down(monkeypatch):
     fresh = _tracked_replica(3)  # distinct object, same id
     fresh.status_property.sky_down_status = common_utils.ProcessStatus.SCHEDULED
     monkeypatch.setattr(serve_state, 'get_replica_infos', lambda svc: [stale])
-    monkeypatch.setattr(replica_managers.ReplicaInfo, 'handle',
+    monkeypatch.setattr(replica_managers.ReplicaInfo,
+                        'handle',
                         lambda self, cluster_record=None: object())
-    monkeypatch.setattr(
-        replica_managers.backends.CloudVmRayBackend, 'get_job_status',
-        lambda self, handle, job_ids, stream_logs=False:
-        {1: job_lib.JobStatus.FAILED})
+    monkeypatch.setattr(replica_managers.backends.CloudVmRayBackend,
+                        'get_job_status',
+                        lambda self, handle, job_ids, stream_logs=False:
+                        {1: job_lib.JobStatus.FAILED})
     monkeypatch.setattr(serve_state, 'get_replica_info_from_id',
                         lambda svc, rid: fresh)
     writes = []

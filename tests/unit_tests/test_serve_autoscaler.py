@@ -172,9 +172,7 @@ class TestInstanceAwareGpuTypeCache(unittest.TestCase):
         info = mock.Mock()
         info.replica_id = 1
         info.status_property.sky_launch_status = launch_status
-        info.handle.return_value.launched_resources.accelerators = {
-            gpu_type: 1
-        }
+        info.handle.return_value.launched_resources.accelerators = {gpu_type: 1}
         return info
 
     def test_provisioning_resolution_is_not_cached(self):
@@ -185,16 +183,13 @@ class TestInstanceAwareGpuTypeCache(unittest.TestCase):
         # Failover rewrote the cluster record with a different accelerator
         # while the replica was still provisioning: it must be re-resolved.
         info.handle.return_value.launched_resources.accelerators = {'L4': 1}
-        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info),
-                         'L4')
+        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info), 'L4')
 
     def test_resolution_cached_once_launch_succeeds(self):
         autoscaler = self._make_autoscaler()
         info = self._make_replica('L4', common_utils.ProcessStatus.SUCCEEDED)
-        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info),
-                         'L4')
-        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info),
-                         'L4')
+        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info), 'L4')
+        self.assertEqual(autoscaler._get_gpu_type_from_replica_info(info), 'L4')
         self.assertEqual(info.handle.call_count, 1)
 
 

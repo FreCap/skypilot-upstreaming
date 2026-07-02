@@ -802,8 +802,8 @@ class SkyPilotReplicaManager(ReplicaManager):
         # per tick. Scoping it to a tick keeps it single-threaded (only the
         # prober thread touches it) and never reuses a spec across ticks, so it
         # cannot go stale even if a version's spec row is later rewritten.
-        self._tick_version_spec_cache: Dict[
-            int, 'service_spec.SkyServiceSpec'] = {}
+        self._tick_version_spec_cache: Dict[int,
+                                            'service_spec.SkyServiceSpec'] = {}
 
         # Run recovery synchronously before launching the daemon threads.
         #
@@ -1211,8 +1211,8 @@ class SkyPilotReplicaManager(ReplicaManager):
         for replica_id, t in launch_thread_pool_snapshot:
             if t.is_alive():
                 continue
-            info = serve_state.get_replica_info_from_id(
-                self._service_name, replica_id)
+            info = serve_state.get_replica_info_from_id(self._service_name,
+                                                        replica_id)
             assert info is not None, replica_id
             if info.status == serve_state.ReplicaStatus.PENDING:
                 # sky.launch not started yet; admitted below under the
@@ -1415,8 +1415,9 @@ class SkyPilotReplicaManager(ReplicaManager):
                     # newer state or double-terminate.
                     fresh = serve_state.get_replica_info_from_id(
                         self._service_name, info.replica_id)
-                    if fresh is None or not (
-                            fresh.status_property.should_track_service_status()):
+                    if fresh is None:
+                        continue
+                    if not fresh.status_property.should_track_service_status():
                         continue
                     is_preempted = self._handle_preemption(fresh)
                 if is_preempted:
@@ -1432,8 +1433,9 @@ class SkyPilotReplicaManager(ReplicaManager):
                     # were SSHing without the lock.
                     fresh = serve_state.get_replica_info_from_id(
                         self._service_name, info.replica_id)
-                    if fresh is None or not (
-                            fresh.status_property.should_track_service_status()):
+                    if fresh is None:
+                        continue
+                    if not fresh.status_property.should_track_service_status():
                         continue
                     fresh.status_property.user_app_failed = True
                     serve_state.add_or_update_replica(self._service_name,

@@ -861,8 +861,8 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
         # the accelerator resolved mid-launch may not be the one the launch
         # finally lands on and must be re-resolved on later ticks.
         if (gpu_type != 'unknown' and
-                replica_info.status_property.sky_launch_status ==
-                common_utils.ProcessStatus.SUCCEEDED):
+                replica_info.status_property.sky_launch_status
+                == common_utils.ProcessStatus.SUCCEEDED):
             self._gpu_type_cache[replica_info.replica_id] = gpu_type
         return gpu_type
 
