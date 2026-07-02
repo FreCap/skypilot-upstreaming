@@ -94,6 +94,48 @@ def test_marks_failed_controller_when_no_restart(monkeypatch):
     assert len(job_done_calls) == 1
 
 
+def test_defers_when_job_reset_for_recovery_midcycle(monkeypatch):
+    """A job reset after the snapshot (WAITING, pid cleared) must be deferred.
+
+    The batched sweep snapshot judges the job dead (ALIVE, dead pid), but the
+    fresh per-job re-read taken just before the destructive action shows it was
+    reset for recovery. Neither the cluster teardown nor the terminal
+    set_failed may run; the next sweep re-judges the job from fresh state.
+    """
+    set_failed_calls, job_done_calls = [], []
+    _wire_dead_controller(monkeypatch, set_failed_calls, job_done_calls)
+    reset_info = {
+        1: {
+            'schedule_state': managed_job_state.ManagedJobScheduleState.WAITING,
+            'controller_pid': None,
+            'controller_pid_started_at': None,
+            'pool': None,
+            'tasks': [{
+                'task_id': 0,
+                'status': managed_job_state.ManagedJobStatus.PENDING,
+                'job_name': 'job',
+            }],
+        }
+    }
+    # First call: the sweep-wide snapshot (dead controller). Second call: the
+    # fresh per-job re-read, showing the job was reset for recovery.
+    snapshots = iter([_make_status_check_info(), reset_info])
+    monkeypatch.setattr(managed_job_state, 'get_jobs_status_check_info',
+                        lambda job_ids: next(snapshots))
+    cleanup_reads = []
+    monkeypatch.setattr(
+        managed_job_state, 'get_managed_job_tasks',
+        lambda job_id: cleanup_reads.append(job_id) or [_make_task()])
+    monkeypatch.setattr(utils, '_controller_is_restarting', lambda: False)
+
+    utils.update_managed_jobs_statuses(job_id=1)
+
+    assert cleanup_reads == [], (
+        'cluster cleanup must not start for a job reset for recovery')
+    assert set_failed_calls == []
+    assert job_done_calls == []
+
+
 def test_controller_is_restarting_reflects_signal_file(monkeypatch, tmp_path):
     sig = tmp_path / 'restart.signal'
     monkeypatch.setattr(utils.constants,
