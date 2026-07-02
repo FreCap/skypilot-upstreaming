@@ -13,6 +13,7 @@ from sky.jobs import state as managed_job_state
 from sky.serve import constants
 from sky.serve import serve_state
 from sky.serve import serve_utils
+from sky.utils import common_utils
 
 if typing.TYPE_CHECKING:
     from sky.serve import replica_managers
@@ -619,12 +620,14 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             'InstanceAware Autoscaler requires dict type target_qps_per_replica'
         # Re-assign with correct type using setattr to avoid typing issues
         self.target_qps_per_replica = spec.target_qps_per_replica
-        # Memoizes a replica's resolved GPU type (replica_id -> gpu_type) so the
-        # blocking handle() DB read + unpickle is not repeated for the same
-        # replica across the 2-3 passes per decision tick. A replica's GPU type
-        # is fixed for its lifetime; only successfully-resolved types are cached
-        # (a still-provisioning replica with no handle yet is re-resolved next
-        # pass). Pruned to the live replica set each tick.
+        # Memoizes a replica's resolved GPU type (replica_id -> gpu_type) so
+        # the blocking handle() DB read + unpickle is not repeated for the same
+        # replica across the 2-3 passes per decision tick. A type is cached
+        # only once the replica's launch has finished: while it is still
+        # provisioning, the cluster record is rewritten for every failover
+        # attempt and its accelerators can change, so a mid-launch resolution
+        # must be re-resolved on later ticks. After launch the type is fixed
+        # for the replica's lifetime. Pruned to the live replica set each tick.
         self._gpu_type_cache: Dict[int, str] = {}
 
     def _generate_scaling_decisions(
@@ -852,9 +855,14 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             if accelerators and len(accelerators) > 0:
                 # Get the first accelerator type
                 gpu_type = list(accelerators.keys())[0]
-        # Only cache a resolved type; a provisioning replica reports 'unknown'
-        # until its handle exists, and must be re-resolved on later ticks.
-        if gpu_type != 'unknown':
+        # Cache only a resolved type of a replica whose launch has finished.
+        # While the replica is still provisioning, the cluster record (and
+        # thus launched_resources) is rewritten for every failover attempt, so
+        # the accelerator resolved mid-launch may not be the one the launch
+        # finally lands on and must be re-resolved on later ticks.
+        if (gpu_type != 'unknown' and
+                replica_info.status_property.sky_launch_status ==
+                common_utils.ProcessStatus.SUCCEEDED):
             self._gpu_type_cache[replica_info.replica_id] = gpu_type
         return gpu_type
 
