@@ -156,16 +156,22 @@ def ttl_cache(scope: Literal['global', 'request'], *ttl_cache_args,
 
     This decorator allows us to track which functions need to be reloaded for a
     new request using the scope argument.
+
+    The shared TTLCache is guarded by a lock: cachetools' memoizing decorators
+    are not thread-safe on their own, and decorated functions may be called
+    concurrently (e.g. the per-cloud catalog fan-out in
+    subprocess_utils.run_in_parallel). The lock is not held while the wrapped
+    function runs, so the worst case under concurrency is a duplicate compute,
+    not cache corruption.
     """
 
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
+        cached_func = cachetools.cached(cachetools.TTLCache(
+            *ttl_cache_args, **ttl_cache_kwargs),
+                                        lock=threading.Lock())(func)
         if scope == 'global':
-            return cachetools.cached(
-                cachetools.TTLCache(*ttl_cache_args, **ttl_cache_kwargs))(func)
-        else:
-            cached_func = cachetools.cached(
-                cachetools.TTLCache(*ttl_cache_args, **ttl_cache_kwargs))(func)
-            return _register_functions_need_reload_cache(cached_func)
+            return cached_func
+        return _register_functions_need_reload_cache(cached_func)
 
     return decorator
 
