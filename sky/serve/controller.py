@@ -8,7 +8,7 @@ import os
 import threading
 import time
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import colorama
 import fastapi
@@ -56,13 +56,14 @@ class SkyServeController:
             autoscalers.Autoscaler.from_spec(service_name, service_spec))
         self._host = host
         self._port = port
-        # [boltz fork] Cache of replica url -> gpu_type for the
-        # load_balancer_sync response. gpu_type (from the replica's launched
-        # accelerators) is fixed for a replica's lifetime, so it is computed
-        # once per replica and reused, instead of calling handle() per replica
-        # on every sync (which starved the LB under a launch storm). Entries are
-        # pruned when a replica is no longer ready.
-        self._lb_gpu_type_cache: Dict[str, str] = {}
+        # Cache of replica_id -> (url, gpu_type) for the load_balancer_sync
+        # response. Both fields require a cluster handle fetch (and, for the
+        # url, an endpoint query) and are fixed for a replica's lifetime once
+        # it is READY, so they are resolved at most once per replica. The
+        # cache is rebuilt from the currently active replicas on every sync,
+        # which prunes replicas that are no longer READY; a replica that
+        # recovers with a new endpoint is thus re-resolved.
+        self._lb_replica_cache: Dict[int, Tuple[str, str]] = {}
         self._app = fastapi.FastAPI(lifespan=self.lifespan)
 
     @contextlib.asynccontextmanager
@@ -72,6 +73,48 @@ class SkyServeController:
             handler.setFormatter(sky_logging.FORMATTER)
             handler.addFilter(AutoscalerInfoFilter())
         yield
+
+    def _get_lb_replica_info(self) -> Dict[str, Dict[str, str]]:
+        """Build the url -> replica info mapping for load_balancer_sync.
+
+        Resolving a replica's url and gpu_type is expensive (a cluster handle
+        fetch plus, for the url, an endpoint query against a database the
+        launch threads contend on), so both are cached per replica for the
+        replica's lifetime: only newly-READY replicas are resolved on a sync.
+        A brand-new replica whose gpu_type cannot be resolved yet is reported
+        as 'unknown' until it is.
+        """
+        record = serve_state.get_service_from_name(self._service_name)
+        assert record is not None, ('No service record found for '
+                                    f'{self._service_name}')
+        active_versions = set(record['active_versions'])
+        replica_cache: Dict[int, Tuple[str, str]] = {}
+        replica_info: Dict[str, Dict[str, str]] = {}
+        for info in serve_state.get_replica_infos(self._service_name):
+            if (info.status != serve_state.ReplicaStatus.READY or
+                    info.version not in active_versions):
+                continue
+            cached = self._lb_replica_cache.get(info.replica_id)
+            if cached is None:
+                url = info.url
+                assert url is not None, info
+                # gpu_type is used by instance-aware load balancing policies.
+                # It derives from the replica's launched accelerators, which
+                # are fixed for the replica's lifetime.
+                gpu_type = 'unknown'
+                handle = info.handle()
+                if handle is not None:
+                    accelerators = handle.launched_resources.accelerators
+                    if accelerators:
+                        gpu_type = list(accelerators.keys())[0]
+                cached = (url, gpu_type)
+            replica_cache[info.replica_id] = cached
+            url, gpu_type = cached
+            replica_info[url] = {'gpu_type': gpu_type}
+        # Replacing the cache with this sync's active replicas prunes the
+        # replicas that are no longer READY.
+        self._lb_replica_cache = replica_cache
+        return replica_info
 
     def _run_autoscaler(self):
         logger.info('Starting autoscaler.')
@@ -131,47 +174,9 @@ class SkyServeController:
             logger.info(f'Received {len(timestamps)} inflight requests.')
             self._autoscaler.collect_request_information(request_aggregator)
 
-            ready_replica_urls = self._replica_manager.get_active_replica_urls()
-            ready_url_set = set(ready_replica_urls)
-
-            # [boltz fork] Resolve gpu_type (used by instance-aware LB policies)
-            # via a per-replica cache instead of recomputing it every sync.
-            #
-            # The previous version looped over ALL replica_infos (provisioning
-            # included) calling info.url (-> handle() + get_endpoints()) per
-            # replica AND info.handle() again for gpu_type — 150+ handle/endpoint
-            # lookups per sync against a DB the launch threads contend on, which
-            # blew the load balancer's sync timeout so the LB got an empty
-            # ready-list and 503'd every request despite dozens of READY
-            # replicas. gpu_type is fixed for a replica's lifetime, so compute it
-            # at most once per replica and cache it. Eventually consistent: a
-            # brand-new replica is reported with gpu_type 'unknown' for at most
-            # one sync before its real type is cached. info.url is evaluated only
-            # for the (usually few) newly-ready replicas, and only for READY ones
-            # (status is checked first so the && short-circuits).
-            for cached_url in list(self._lb_gpu_type_cache):
-                if cached_url not in ready_url_set:
-                    del self._lb_gpu_type_cache[cached_url]
-            uncached_urls = ready_url_set - set(self._lb_gpu_type_cache)
-            if uncached_urls:
-                for info in serve_state.get_replica_infos(self._service_name):
-                    if (info.status == serve_state.ReplicaStatus.READY and
-                            info.url in uncached_urls):
-                        gpu_type = 'unknown'
-                        handle = info.handle()
-                        if handle is not None:
-                            accelerators = handle.launched_resources.accelerators
-                            if accelerators:
-                                gpu_type = list(accelerators.keys())[0]
-                        self._lb_gpu_type_cache[info.url] = gpu_type
-            replica_info = {
-                url: {
-                    'gpu_type': self._lb_gpu_type_cache.get(url, 'unknown')
-                } for url in ready_replica_urls
-            }
-
             return responses.JSONResponse(
-                content={'replica_info': replica_info}, status_code=200)
+                content={'replica_info': self._get_lb_replica_info()},
+                status_code=200)
 
         @self._app.post('/controller/update_service')
         async def update_service(request: fastapi.Request) -> fastapi.Response:
