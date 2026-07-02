@@ -16,6 +16,8 @@ failed controller bring-up.
 """
 import types
 
+import pytest
+
 from sky.serve import serve_state
 from sky.serve import service
 from sky.utils import common_utils
@@ -196,6 +198,31 @@ def test_respawn_lb_failure_returns_live_controller_with_no_lb(monkeypatch):
                                                 _FakeProc(False, 111), None)
 
     assert result == (new_ctrl, None, _PORT)
+
+
+# --- _wait_for_controller_ready ---
+
+
+def test_wait_for_controller_ready_fails_fast_on_dead_process(monkeypatch):
+    """A dead child must fail the readiness wait immediately (before any
+    connection attempt), not burn the whole timeout -- the wait can run while
+    holding the host-global port-selection lock."""
+    attempts = []
+
+    def _connect(*a, **k):
+        attempts.append(1)
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr(service.socket, 'create_connection', _connect)
+
+    with pytest.raises(RuntimeError):
+        service._wait_for_controller_ready('127.0.0.1',
+                                           _PORT,
+                                           timeout=30,
+                                           process=_FakeProc(alive=False))
+
+    assert attempts == [], ('the wait must bail on the dead process before '
+                            'probing the port')
 
 
 # --- _ensure_load_balancer ---

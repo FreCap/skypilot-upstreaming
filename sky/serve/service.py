@@ -304,17 +304,31 @@ def _cleanup_task_run_script(job_id: int) -> None:
             logger.warning(f'Task run script {this_task_run_script} not found')
 
 
-def _wait_for_controller_ready(host: str, port: int, timeout: int = 30) -> None:
+def _wait_for_controller_ready(
+        host: str,
+        port: int,
+        timeout: int = 30,
+        process: Optional[multiprocessing.Process] = None) -> None:
     """Block until the controller HTTP server is accepting connections.
 
     We must not flip DB `controller_pid`/`controller_ip` until the new
     subprocess is actually listening, otherwise clients routed by DB hit
     the new pod's IP before its uvicorn binds and get ECONNREFUSED.
+
+    If `process` is given, fail as soon as it is no longer alive instead of
+    burning the full timeout: this wait runs while holding the host-global
+    port-selection lock, so a controller child that dies at boot would
+    otherwise hold that lock for the entire timeout on every (5s-cadence)
+    respawn retry, starving other services' boot/recovery on the same host.
     """
     # When binding 0.0.0.0, probe via loopback.
     probe_host = '127.0.0.1' if host == '0.0.0.0' else host
     start = time.time()
     while time.time() - start < timeout:
+        if process is not None and not process.is_alive():
+            raise RuntimeError(
+                f'Controller process exited (exitcode={process.exitcode}) '
+                f'before becoming ready on {probe_host}:{port}')
         try:
             with socket.create_connection((probe_host, port), timeout=0.5):
                 return
@@ -533,9 +547,14 @@ def _respawn_controller_and_lb(
             new_controller = _spawn_controller(service_name, service_spec,
                                                version, controller_host,
                                                controller_port)
+            # `process=` fails this wait fast if the replacement dies at boot,
+            # instead of holding the port-selection lock for the full timeout
+            # on every retry of a crash-looping controller.
             _wait_for_controller_ready(
-                controller_host, controller_port,
-                timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS)
+                controller_host,
+                controller_port,
+                timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS,
+                process=new_controller)
             if not new_controller.is_alive():
                 raise RuntimeError(
                     'replacement controller exited during startup')
@@ -802,7 +821,8 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                 _wait_for_controller_ready(
                     controller_host,
                     controller_port,
-                    timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS)
+                    timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS,
+                    process=controller_process)
             except RuntimeError as boot_err:
                 # Bail without falling through to the outer try/finally,
                 # which would call _cleanup → remove_ha_recovery_script
