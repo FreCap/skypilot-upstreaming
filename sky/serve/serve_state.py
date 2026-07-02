@@ -475,6 +475,31 @@ def set_service_controller_port(service_name: str,
         session.commit()
 
 
+def set_service_controller_port_if_owner(service_name: str,
+                                         controller_pid: int,
+                                         controller_port: int) -> bool:
+    """Sets the controller port only if `controller_pid` still owns the row.
+
+    Compare-and-swap for the in-place controller respawn: a parent whose
+    ownership has been taken over by HA recovery on another pod (which
+    atomically flipped pid/ip/port) must not clobber the new owner's port,
+    which would recreate the half-flipped row (new pid/ip + stale port) that
+    `update_service_controller_pid_ip_and_port` exists to prevent.
+
+    Returns:
+        True if the row was updated (the pid still owns the service), False
+        if ownership was lost or the row no longer exists.
+    """
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        count = session.query(services_table).filter(
+            services_table.c.name == service_name,
+            services_table.c.controller_pid == controller_pid).update(
+                {services_table.c.controller_port: controller_port})
+        session.commit()
+    return count > 0
+
+
 def set_service_load_balancer_port(service_name: str,
                                    load_balancer_port: int) -> None:
     """Sets the load balancer port of a service."""

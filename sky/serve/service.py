@@ -499,8 +499,12 @@ def _respawn_controller_and_lb(
     pod: another service cannot already hold a port we just found free and hold
     the lock for. The LB is restarted pointing at the new controller addr but on
     the SAME public `load_balancer_port`, so the service endpoint is stable. The
-    DB controller_port is updated; controller_pid/ip (the live parent) and the
-    public load_balancer_port are unchanged.
+    DB controller_port write is guarded by row ownership (compare-and-swap on
+    `controller_pid`): HA recovery on another pod may have taken the row over
+    since our last (30s-cadence) orphan check, and an unconditional write would
+    cross-wire the new owner's atomically-flipped pid/ip/port with our stale
+    port. controller_pid/ip (the live parent) and the public load_balancer_port
+    are unchanged.
 
     Returns (controller_process, lb_process, controller_port) on success, or
     None on failure (retry next tick). Never raises into _start's destructive
@@ -535,8 +539,18 @@ def _respawn_controller_and_lb(
             if not new_controller.is_alive():
                 raise RuntimeError(
                     'replacement controller exited during startup')
-            serve_state.set_service_controller_port(service_name,
-                                                    controller_port)
+            if not serve_state.set_service_controller_port_if_owner(
+                    service_name, os.getpid(), controller_port):
+                # Another instance (HA recovery on a different pod) took over
+                # the row while we were bringing up the replacement. Discard it
+                # and keep the old LB; the orphan check in _start's loop will
+                # exit this parent shortly.
+                logger.warning(
+                    f'Lost ownership of service {service_name} during the '
+                    'controller respawn; discarding the replacement '
+                    'controller.')
+                _kill_process(new_controller)
+                return None
     except Exception as e:  # pylint: disable=broad-except
         logger.error(f'Failed to bring up a replacement controller for '
                      f'{service_name}: {common_utils.format_exception(e)}; '

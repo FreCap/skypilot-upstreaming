@@ -52,13 +52,14 @@ def _spec(pool=False):
 
 
 def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
-           latest_version=None, latest_spec=None, killed=None):
+           latest_version=None, latest_spec=None, killed=None,
+           owns_row=True):
     """Wire the respawn collaborators. new_controller/new_lb may be _FakeProc,
     None, or an Exception instance to raise from the spawn."""
     monkeypatch.setattr(service.filelock, 'FileLock', _DummyLock)
     monkeypatch.setattr(common_utils, 'find_free_port', lambda start: _PORT)
-    monkeypatch.setattr(serve_state, 'set_service_controller_port',
-                        lambda name, port: None)
+    monkeypatch.setattr(serve_state, 'set_service_controller_port_if_owner',
+                        lambda name, pid, port: owns_row)
     monkeypatch.setattr(serve_state, 'get_latest_version',
                         lambda name: latest_version)
     monkeypatch.setattr(serve_state, 'get_spec',
@@ -163,6 +164,24 @@ def test_respawn_controller_spawn_raises_is_contained(monkeypatch):
 
     assert result is None  # contained, not raised
     assert 222 not in killed, 'old LB preserved when controller spawn fails'
+
+
+def test_respawn_lost_row_ownership_discards_replacement(monkeypatch):
+    """If another instance took over the DB row while the replacement was
+    booting, the guarded port write reports lost ownership: the replacement
+    must be discarded (not returned) and the old LB preserved."""
+    old_lb = _FakeProc(alive=True, pid=222)
+    new_ctrl = _FakeProc(alive=True, pid=333)
+    killed = []
+    _setup(monkeypatch, new_controller=new_ctrl, killed=killed, owns_row=False)
+
+    result = service._respawn_controller_and_lb('svc', _spec(), 1, '127.0.0.1',
+                                                30001, '/tmp/lb.log',
+                                                _FakeProc(False, 111), old_lb)
+
+    assert result is None
+    assert 333 in killed, 'the disowned replacement controller must be reaped'
+    assert 222 not in killed, 'the old LB must be preserved on lost ownership'
 
 
 def test_respawn_lb_failure_returns_live_controller_with_no_lb(monkeypatch):
