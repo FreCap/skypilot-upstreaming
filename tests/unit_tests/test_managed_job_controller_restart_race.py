@@ -94,6 +94,30 @@ def test_marks_failed_controller_when_no_restart(monkeypatch):
     assert len(job_done_calls) == 1
 
 
+def test_defers_terminal_write_when_restart_begins_during_cleanup(monkeypatch):
+    """A restart beginning during cluster teardown must defer set_failed.
+
+    The restart signal is absent at the top-of-function check and at the
+    pre-cleanup re-check, and appears while the (potentially minutes-long)
+    cluster teardown runs. Cleanup has already happened, but the terminal
+    set_failed / job_done must not.
+    """
+    set_failed_calls, job_done_calls = [], []
+    _wire_dead_controller(monkeypatch, set_failed_calls, job_done_calls)
+    seq = iter([False, False, True])
+    monkeypatch.setattr(utils, '_controller_is_restarting', lambda: next(seq))
+    cleanup_reads = []
+    monkeypatch.setattr(
+        managed_job_state, 'get_managed_job_tasks',
+        lambda job_id: cleanup_reads.append(job_id) or [_make_task()])
+
+    utils.update_managed_jobs_statuses(job_id=1)
+
+    assert cleanup_reads == [1], 'cluster cleanup should have started'
+    assert set_failed_calls == []
+    assert job_done_calls == []
+
+
 def test_defers_when_job_reset_for_recovery_midcycle(monkeypatch):
     """A job reset after the snapshot (WAITING, pid cleared) must be deferred.
 

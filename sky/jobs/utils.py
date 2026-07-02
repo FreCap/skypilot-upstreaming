@@ -823,6 +823,17 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         if cleanup_error:
             cleanup_error_msg = f'Also, cleanup failed: {cleanup_error}. '
 
+        # Cluster teardown can take minutes, so a restart can begin while it
+        # runs. The cluster is gone either way, but the terminal set_failed
+        # below is what makes the job unrecoverable -- defer it so a restarted
+        # controller can resume the job (recovery relaunches the cluster).
+        if _controller_is_restarting():
+            logger.info(
+                f'Controller restart began during cluster cleanup; deferring '
+                f'FAILED_CONTROLLER for job {job_id} (will re-check on the '
+                f'next status update).')
+            continue
+
         # Set all tasks to FAILED_CONTROLLER, regardless of current status.
         # This may change a job from SUCCEEDED or another terminal state to
         # FAILED_CONTROLLER. This is what we want - we are sure that this
