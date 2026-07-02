@@ -134,6 +134,31 @@ def test_respawn_reloads_latest_version_and_spec(monkeypatch):
     assert spawn_calls[0]['spec'] is latest_spec
 
 
+def test_respawn_db_error_retries_instead_of_stale_spec(monkeypatch):
+    """If the committed-version reload fails, the respawn must not proceed
+    with the captured boot-time version/spec (stale after an in-place update:
+    a controller rebuilt from them would downgrade the service). It returns
+    None to retry on the next tick, leaving the old LB running."""
+    old_lb = _FakeProc(alive=True, pid=222)
+    spawn_calls, killed = _setup(monkeypatch,
+                                 new_controller=_FakeProc(alive=True, pid=333),
+                                 new_lb=_FakeProc(alive=True, pid=444))
+
+    def _db_error(name):
+        raise RuntimeError('db unavailable')
+
+    monkeypatch.setattr(serve_state, 'get_latest_committed_version', _db_error)
+
+    result = service._respawn_controller_and_lb('svc', _spec(), 1, '127.0.0.1',
+                                                30001, '/tmp/lb.log',
+                                                _FakeProc(alive=False, pid=111),
+                                                old_lb)
+
+    assert result is None
+    assert spawn_calls == []
+    assert 222 not in killed, 'the old LB must be preserved for the retry'
+
+
 def test_respawn_controller_failure_preserves_old_lb(monkeypatch):
     """If the replacement controller never becomes live, return None and leave
     the OLD load balancer running so the data plane survives retries."""

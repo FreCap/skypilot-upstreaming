@@ -508,11 +508,14 @@ def _respawn_controller_and_lb(
     confirmed, so the data plane is not dropped during retries.
     """
     # Reload the latest COMMITTED version + spec so a respawn after
-    # /update_service uses the current config (fall back to captured values on a
-    # DB error). Use the committed version, not raw MAX(version): an interrupted
-    # `sky serve update` can leave a NULL-yaml placeholder as MAX whose spec is
-    # None, which would otherwise drop us back to the stale captured parent
-    # version/spec instead of the latest fully-committed version.
+    # /update_service uses the current config. Use the committed version, not
+    # raw MAX(version): an interrupted `sky serve update` can leave a NULL-yaml
+    # placeholder as MAX whose spec is None, which would otherwise drop us back
+    # to the stale captured parent version/spec instead of the latest
+    # fully-committed version. On a DB error, retry on the next tick instead of
+    # proceeding: the captured version/spec are stale after an in-place update,
+    # and a controller rebuilt from them would tear down every newer-version
+    # replica and relaunch old-version ones.
     try:
         latest = serve_state.get_latest_committed_version(service_name)
         if latest is not None:
@@ -520,9 +523,10 @@ def _respawn_controller_and_lb(
             if spec is not None:
                 version, service_spec = latest, spec
     except Exception as e:  # pylint: disable=broad-except
-        logger.warning(f'Could not reload latest version/spec for '
-                       f'{service_name} on respawn ({e}); using captured '
-                       f'version {version}.')
+        logger.error(f'Failed to reload the latest committed version/spec for '
+                     f'{service_name}: {common_utils.format_exception(e)}; '
+                     f'will retry on the next tick.')
+        return None  # old LB left running -> data plane preserved during retry
 
     new_controller = None
     try:
