@@ -8,7 +8,7 @@ resume timer living only in an in-memory monitor thread). If the shutdown query
 omits WAITING, a parked request is neither waited for nor flagged for retry, its
 in-memory timer dies with the process, and ``reset_db_and_logs`` wipes the row
 on the next boot -- silently dropping the request on a *clean* restart even
-though the whole ``should_retry`` machinery exists. These tests pin that
+though the whole ``should_retry`` machinery exists. This test pins that
 WAITING is treated like the other active statuses.
 """
 import unittest.mock as mock
@@ -50,41 +50,21 @@ def _make_request(request_id: str, status: RequestStatus) -> requests.Request:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_active_requests_includes_waiting(isolated_database):
-    backend = request_storage.get_request_backend()
-    for request_id, status in [
-        ('req-pending', RequestStatus.PENDING),
-        ('req-waiting', RequestStatus.WAITING),
-        ('req-running', RequestStatus.RUNNING),
-        ('req-succeeded', RequestStatus.SUCCEEDED),
-        ('req-failed', RequestStatus.FAILED),
-    ]:
-        assert await requests.create_if_not_exists_async(
-            _make_request(request_id, status))
-
-    active_ids = {rid for rid, _ in backend.get_shutdown_active_requests()}
-
-    # A WAITING request must be waited for / retried on graceful shutdown,
-    # exactly like PENDING and RUNNING -- it is the regression this pins.
-    assert 'req-waiting' in active_ids
-    assert active_ids == {'req-pending', 'req-waiting', 'req-running'}
-
-
-@pytest.mark.asyncio
-async def test_shutdown_active_requests_matches_active_statuses(
+async def test_shutdown_query_returns_exactly_the_active_requests(
         isolated_database):
-    # The shutdown query must cover every non-terminal status, so no in-flight
-    # request can slip past graceful shutdown unpreserved.
     backend = request_storage.get_request_backend()
-    expected_ids = set()
-    for i, status in enumerate(RequestStatus.active_statuses()):
-        request_id = f'req-{i}'
+    for status in RequestStatus:
         assert await requests.create_if_not_exists_async(
-            _make_request(request_id, status))
-        expected_ids.add(request_id)
+            _make_request(f'req-{status.value.lower()}', status))
 
     active_ids = {rid for rid, _ in backend.get_shutdown_active_requests()}
 
-    # Set equality, not just count: a query that swapped one active status for
-    # an equal number of others (the exact drift this guards) would still fail.
-    assert active_ids == expected_ids
+    # A WAITING request must be waited for / retried on graceful shutdown --
+    # it is the regression this pins.
+    assert 'req-waiting' in active_ids
+    # And the query must cover exactly the active (non-terminal) statuses, so
+    # no in-flight request can slip past graceful shutdown unpreserved.
+    assert active_ids == {
+        f'req-{status.value.lower()}'
+        for status in RequestStatus.active_statuses()
+    }

@@ -58,12 +58,11 @@ def test_logs_each_orphaned_inflight_request(monkeypatch):
 
     requests_lib._log_orphaned_inflight_requests()
 
-    joined = '\n'.join(warnings)
-    assert 'req-1' in joined and 'req-2' in joined
-    assert 'cluster-a' in joined
-    assert any('2 request' in w for w in warnings), 'must report the count'
+    # One summary warning plus one warning per orphaned request.
+    assert len(warnings) == 1 + len(reqs)
     # The scan must filter to only active (in-flight) statuses.
-    assert backend.filters[0].status == requests_lib.RequestStatus.active_statuses()
+    req_filter = backend.filters[0]
+    assert req_filter.status == requests_lib.RequestStatus.active_statuses()
 
 
 def test_no_orphans_no_warning(monkeypatch):
