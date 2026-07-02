@@ -956,6 +956,9 @@ class SkyPilotReplicaManager(ReplicaManager):
         # against any drift so id allocation can never clobber a live replica.
         while serve_state.get_replica_info_from_id(
                 self._service_name, self._next_replica_id) is not None:
+            logger.warning(f'Replica id {self._next_replica_id} still has a '
+                           'durable replica row; skipping it to avoid '
+                           'clobbering a live replica.')
             self._next_replica_id += 1
         self._launch_replica(self._next_replica_id, resources_override)
         self._next_replica_id += 1
