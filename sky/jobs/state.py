@@ -1414,8 +1414,7 @@ def get_managed_job_tasks(job_id: int) -> List[Dict[str, Any]]:
 _STATUS_CHECK_JOB_ID_CHUNK = 500
 
 
-def get_jobs_status_check_info(
-        job_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+def get_jobs_status_check_info(job_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     """Batched, slim fetch of the fields the status-refresh tick needs.
 
     ``update_managed_jobs_statuses`` only consumes a handful of small scalar
@@ -1472,8 +1471,8 @@ def get_jobs_status_check_info(
             # in sync with get_managed_job_tasks.
             if info is None:
                 info = {
-                    'schedule_state':
-                        ManagedJobScheduleState(mapping['schedule_state']),
+                    'schedule_state': ManagedJobScheduleState(
+                        mapping['schedule_state']),
                     'controller_pid': mapping['controller_pid'],
                     'controller_pid_started_at':
                         mapping['controller_pid_started_at'],

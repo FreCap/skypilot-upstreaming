@@ -47,7 +47,8 @@ def _make_status_check_info():
 
 
 def _wire_dead_controller(monkeypatch, set_failed_calls, job_done_calls):
-    monkeypatch.setattr(managed_job_state, 'get_jobs_to_check_status',
+    monkeypatch.setattr(managed_job_state,
+                        'get_jobs_to_check_status',
                         lambda job_id=None: [1])
     monkeypatch.setattr(managed_job_state, 'get_jobs_status_check_info',
                         lambda job_ids: _make_status_check_info())
@@ -59,8 +60,8 @@ def _wire_dead_controller(monkeypatch, set_failed_calls, job_done_calls):
     monkeypatch.setattr(
         managed_job_state, 'get_job_schedule_state',
         lambda job_id: managed_job_state.ManagedJobScheduleState.ALIVE)
-    monkeypatch.setattr(utils.global_user_state,
-                        'get_handle_from_cluster_name', lambda name: None)
+    monkeypatch.setattr(utils.global_user_state, 'get_handle_from_cluster_name',
+                        lambda name: None)
     monkeypatch.setattr(managed_job_state, 'set_failed',
                         lambda *a, **k: set_failed_calls.append((a, k)))
     monkeypatch.setattr(utils.scheduler, 'job_done',
@@ -78,7 +79,8 @@ def test_defers_failed_controller_when_restart_begins_midcycle(monkeypatch):
     utils.update_managed_jobs_statuses(job_id=1)
 
     assert set_failed_calls == [], (
-        'a job must not be FAILED_CONTROLLER while its controller is restarting')
+        'a job must not be FAILED_CONTROLLER while its controller is restarting'
+    )
     assert job_done_calls == []
 
 
@@ -198,7 +200,8 @@ def test_pending_job_skips_controller_status_read(monkeypatch, schedule_state):
         get_status_calls.append(job_id)
         return job_lib.JobStatus.FAILED_SETUP
 
-    monkeypatch.setattr(managed_job_state, 'get_jobs_to_check_status',
+    monkeypatch.setattr(managed_job_state,
+                        'get_jobs_to_check_status',
                         lambda job_id=None: [1])
     monkeypatch.setattr(
         managed_job_state, 'get_jobs_status_check_info',

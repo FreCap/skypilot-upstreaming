@@ -787,8 +787,8 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         # confirms the exact values the judgment was based on; otherwise defer
         # to the next status-update cycle, which will re-judge the job from
         # fresh state.
-        fresh_info = managed_job_state.get_jobs_status_check_info(
-            [job_id]).get(job_id)
+        fresh_infos = managed_job_state.get_jobs_status_check_info([job_id])
+        fresh_info = fresh_infos.get(job_id)
         if (fresh_info is None or
                 fresh_info['schedule_state'] != schedule_state or
                 fresh_info['controller_pid'] != pid or
