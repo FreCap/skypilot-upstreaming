@@ -104,9 +104,10 @@ def _add_atomic_service(name: str, version=serve_constants.INITIAL_VERSION):
         controller_pid=12345,
         entrypoint='entry',
         version=version,
-        # `spec` is only ever pickled, never type-checked at this layer (mirrors
-        # how add_or_update_version is exercised elsewhere in this file).
-        spec='spec-1',
+        # A None spec is stored as pickled None (like `add_version` does), so
+        # the read path (`_get_service_from_row`) skips the spec-dependent
+        # fields instead of calling SkyServiceSpec methods on it.
+        spec=None,
         yaml_content='yaml: v1',
         controller_ip='10.0.0.7',
     )
