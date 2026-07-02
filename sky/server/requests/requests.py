@@ -575,6 +575,22 @@ def _init_db_within_lock():
         _DB = db_utils.SQLiteConn(db_path, create_table)
 
 
+def _close_db_within_lock():
+    """Close the calling thread's DB connection and drop the handle.
+
+    The next DB access re-initializes the handle, re-creating the database
+    file and its tables if needed. ``_DB`` is thread-local, so only the
+    calling thread's connection can be closed here: this is only safe during
+    single-threaded startup, before any other thread or event loop has
+    touched the request DB.
+    """
+    global _DB
+    if _DB is None:
+        return
+    _DB.conn.close()
+    _DB = None
+
+
 def _ensure_db_initialized():
     """Ensure the database is initialized.
 
@@ -673,6 +689,13 @@ def reset_db_and_logs():
     # Surface any requests still in-flight when the server stopped BEFORE we
     # wipe them, so the drop is alertable rather than silent (see helper).
     _log_orphaned_inflight_requests()
+    # The scan may have initialized the module-level DB handle against the
+    # database file that is about to be removed. Drop the handle before the
+    # wipe so reset_on_startup() below re-creates the fresh database and its
+    # tables, instead of leaving this thread's connection bound to the
+    # unlinked file.
+    with _init_db_lock:
+        _close_db_within_lock()
     logger.debug('clearing local API server database')
     server_common.clear_local_api_server_database()
     logger.debug('clearing local API server logs directory at '
