@@ -80,4 +80,4 @@ def test_stop_event_halts_supervision():
 
     t.join(timeout=5)
     assert not t.is_alive()
-    assert calls == [], 'a pre-set stop_event must prevent the target running'
+    assert not calls, 'a pre-set stop_event must prevent the target running'

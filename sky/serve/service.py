@@ -418,10 +418,10 @@ def _bail_on_boot_failure(service_name: str,
     os._exit(1)  # pylint: disable=protected-access
 
 
-def _spawn_controller(
-        service_name: str, service_spec: 'service_spec_lib.SkyServiceSpec',
-        version: int, controller_host: str,
-        controller_port: int) -> multiprocessing.Process:
+def _spawn_controller(service_name: str,
+                      service_spec: 'service_spec_lib.SkyServiceSpec',
+                      version: int, controller_host: str,
+                      controller_port: int) -> multiprocessing.Process:
     """Spawn (and start) the controller server subprocess for a service.
 
     Factored out of `_start` so the supervision loop can re-create the
@@ -497,8 +497,8 @@ def _respawn_controller_and_lb(
     load_balancer_log_file: str,
     dead_controller: Optional[multiprocessing.Process],
     old_lb: Optional[multiprocessing.Process]
-) -> Optional[Tuple[multiprocessing.Process,
-                    Optional[multiprocessing.Process], int]]:
+) -> Optional[Tuple[multiprocessing.Process, Optional[multiprocessing.Process],
+                    int]]:
     """Re-create the controller (on a FRESH port) and restart the LB after the
     controller child died while the _start parent is still alive.
 
@@ -600,9 +600,9 @@ def _should_resume_teardown(is_recovery: bool,
     other reason left a non-teardown status (e.g. READY) and is recovered
     normally (brought back up).
     """
-    return (is_recovery and service is not None and service['status'] in (
-        serve_state.ServiceStatus.SHUTTING_DOWN,
-        serve_state.ServiceStatus.FAILED_CLEANUP))
+    return (is_recovery and service is not None and
+            service['status'] in (serve_state.ServiceStatus.SHUTTING_DOWN,
+                                  serve_state.ServiceStatus.FAILED_CLEANUP))
 
 
 def _run_cleanup_and_finalize(service_name: str,

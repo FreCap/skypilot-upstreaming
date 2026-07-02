@@ -14,6 +14,7 @@ after all destructive teardown. These tests pin the ordering invariant: the
 script must outlive replica teardown so a crash partway through leaves recovery
 able to respawn the controller and re-run cleanup.
 """
+# pylint: disable=protected-access
 import types
 
 import pytest
@@ -22,7 +23,6 @@ from sky import exceptions
 from sky.serve import replica_managers
 from sky.serve import serve_state
 from sky.serve import service
-from sky.utils import common_utils
 from sky.utils import controller_utils
 
 
@@ -49,18 +49,18 @@ def _patch_common(monkeypatch, events, replicas):
                         lambda *a, **k: None)
     monkeypatch.setattr(serve_state, 'remove_replica', lambda *a, **k: None)
     monkeypatch.setattr(serve_state, 'get_service_versions', lambda svc: [])
-    monkeypatch.setattr(controller_utils, 'can_terminate',
+    monkeypatch.setattr(controller_utils,
+                        'can_terminate',
                         lambda pool, in_flight=None: True)
-    monkeypatch.setattr(
-        serve_state, 'remove_ha_recovery_script',
-        lambda svc: events.append('remove_recovery_script'))
+    monkeypatch.setattr(serve_state, 'remove_ha_recovery_script',
+                        lambda svc: events.append('remove_recovery_script'))
 
 
 def test_recovery_script_removed_after_replica_teardown(monkeypatch):
     """The recovery script must be deleted only AFTER replica teardown runs."""
     events = []
 
-    def _terminate(cluster_name, log_file_name):
+    def _terminate(cluster_name, unused_log_file_name):
         events.append(f'teardown:{cluster_name}')
 
     monkeypatch.setattr(replica_managers, 'terminate_cluster', _terminate)
@@ -69,8 +69,9 @@ def test_recovery_script_removed_after_replica_teardown(monkeypatch):
     failed = service._cleanup('svc', pool=False)
 
     assert failed is False
-    assert events == ['teardown:c1', 'remove_recovery_script'], (
-        'recovery script must be removed only after replica teardown; '
+    assert events == [
+        'teardown:c1', 'remove_recovery_script'
+    ], ('recovery script must be removed only after replica teardown; '
         f'got order {events}')
 
 
@@ -171,7 +172,7 @@ def test_handle_signal_persists_shutting_down_before_consuming_signal(
                         str(tmp_path / '{}.signal'))
     observed = []
 
-    def _record_status(name, status):
+    def _record_status(unused_name, status):
         # The signal file must still exist when we persist SHUTTING_DOWN.
         observed.append((status, sig.exists()))
 

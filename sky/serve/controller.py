@@ -280,8 +280,7 @@ class SkyServeController:
         # Supervised so a BaseException escaping the autoscaler loop (or the
         # loop returning) does not silently stop all scaling decisions while
         # the controller keeps serving HTTP -- it is restarted instead.
-        thread_utils.start_supervised_thread(self._run_autoscaler,
-                                             'autoscaler')
+        thread_utils.start_supervised_thread(self._run_autoscaler, 'autoscaler')
 
         logger.info('SkyServe Controller started on '
                     f'http://{self._host}:{self._port}. PID: {os.getpid()}')

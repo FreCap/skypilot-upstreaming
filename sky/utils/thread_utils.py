@@ -58,10 +58,10 @@ def start_supervised_thread(
             except BaseException as e:  # pylint: disable=broad-except
                 if not _keep_running():
                     break
-                logger.error(
-                    f'Supervised thread {name!r} died with '
-                    f'{common_utils.format_exception(e)!r}; restarting after '
-                    f'{restart_backoff_seconds}s.')
+                # NOTE: not common_utils.format_exception, whose signature does
+                # not admit an arbitrary BaseException.
+                logger.error(f'Supervised thread {name!r} died with {e!r}; '
+                             f'restarting after {restart_backoff_seconds}s.')
             # Interruptible backoff so a stop is honored promptly.
             if stop_event is not None:
                 stop_event.wait(restart_backoff_seconds)

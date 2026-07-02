@@ -475,8 +475,7 @@ def set_service_controller_port(service_name: str,
         session.commit()
 
 
-def set_service_controller_port_if_owner(service_name: str,
-                                         controller_pid: int,
+def set_service_controller_port_if_owner(service_name: str, controller_pid: int,
                                          controller_port: int) -> bool:
     """Sets the controller port only if `controller_pid` still owns the row.
 

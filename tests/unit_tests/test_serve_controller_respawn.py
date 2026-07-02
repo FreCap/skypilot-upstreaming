@@ -14,6 +14,7 @@ tests pin their contracts, including that failures are contained (never raised
 into ``_start``'s destructive ``_cleanup``) and the data plane is preserved on a
 failed controller bring-up.
 """
+# pylint: disable=protected-access
 import types
 
 import pytest
@@ -53,8 +54,14 @@ def _spec(pool=False):
     return types.SimpleNamespace(pool=pool)
 
 
-def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
-           latest_version=None, latest_spec=None, killed=None,
+def _setup(monkeypatch,
+           *,
+           new_controller,
+           new_lb=None,
+           ready=True,
+           latest_version=None,
+           latest_spec=None,
+           killed=None,
            owns_row=True):
     """Wire the respawn collaborators. new_controller/new_lb may be _FakeProc,
     None, or an Exception instance to raise from the spawn."""
@@ -64,12 +71,12 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
                         lambda name, pid, port: owns_row)
     monkeypatch.setattr(serve_state, 'get_latest_version',
                         lambda name: latest_version)
-    monkeypatch.setattr(serve_state, 'get_spec',
-                        lambda name, ver: latest_spec)
+    monkeypatch.setattr(serve_state, 'get_spec', lambda name, ver: latest_spec)
 
     spawn_ctrl_calls = []
 
-    def _spawn_controller(service_name, spec, version, host, port):
+    def _spawn_controller(unused_service_name, spec, version, unused_host,
+                          port):
         spawn_ctrl_calls.append(dict(spec=spec, version=version, port=port))
         if isinstance(new_controller, BaseException):
             raise new_controller
@@ -77,7 +84,7 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
 
     monkeypatch.setattr(service, '_spawn_controller', _spawn_controller)
 
-    def _spawn_lb(controller_addr, lb_port, spec, log_file):
+    def _spawn_lb(*_args, **_kwargs):
         if isinstance(new_lb, BaseException):
             raise new_lb
         return new_lb
@@ -88,6 +95,7 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
         monkeypatch.setattr(service, '_wait_for_controller_ready',
                             lambda *a, **k: None)
     else:
+
         def _not_ready(*a, **k):
             raise RuntimeError('not ready')
 
@@ -96,7 +104,8 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
     if killed is None:
         killed = []
     monkeypatch.setattr(
-        subprocess_utils, 'kill_children_processes',
+        subprocess_utils,
+        'kill_children_processes',
         lambda parent_pids, force=False: killed.extend(parent_pids))
     return spawn_ctrl_calls, killed
 
@@ -127,7 +136,8 @@ def test_respawn_reloads_latest_version_and_spec(monkeypatch):
     spawn_calls, _ = _setup(monkeypatch,
                             new_controller=_FakeProc(alive=True, pid=333),
                             new_lb=_FakeProc(alive=True, pid=444),
-                            latest_version=7, latest_spec=latest_spec)
+                            latest_version=7,
+                            latest_spec=latest_spec)
 
     service._respawn_controller_and_lb('svc', _spec(), 1, '127.0.0.1', 30001,
                                        '/tmp/lb.log',
@@ -209,7 +219,7 @@ def test_wait_for_controller_ready_fails_fast_on_dead_process(monkeypatch):
     holding the host-global port-selection lock."""
     attempts = []
 
-    def _connect(*a, **k):
+    def _connect(*_args, **_kwargs):
         attempts.append(1)
         raise ConnectionRefusedError()
 
@@ -221,20 +231,20 @@ def test_wait_for_controller_ready_fails_fast_on_dead_process(monkeypatch):
                                            timeout=30,
                                            process=_FakeProc(alive=False))
 
-    assert attempts == [], ('the wait must bail on the dead process before '
-                            'probing the port')
+    assert not attempts, ('the wait must bail on the dead process before '
+                          'probing the port')
 
 
 # --- _ensure_load_balancer ---
 
 
 def test_ensure_lb_noop_for_pool(monkeypatch):
-    monkeypatch.setattr(service, '_spawn_load_balancer',
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError('pool has no LB')))
+    monkeypatch.setattr(
+        service, '_spawn_load_balancer', lambda *a, **k:
+        (_ for _ in ()).throw(AssertionError('pool has no LB')))
     lb = _FakeProc(alive=True, pid=1)
-    assert service._ensure_load_balancer(lb, 'http://h:1', 30001, _spec(
-        pool=True), '/tmp/lb.log') is lb
+    assert service._ensure_load_balancer(lb, 'http://h:1', 30001,
+                                         _spec(pool=True), '/tmp/lb.log') is lb
 
 
 def test_ensure_lb_keeps_live_lb(monkeypatch):
@@ -244,7 +254,7 @@ def test_ensure_lb_keeps_live_lb(monkeypatch):
     lb = _FakeProc(alive=True, pid=1)
     assert service._ensure_load_balancer(lb, 'http://h:1', 30001, _spec(),
                                          '/tmp/lb.log') is lb
-    assert spawned == []
+    assert not spawned
 
 
 def test_ensure_lb_restarts_dead_lb(monkeypatch):
@@ -252,16 +262,18 @@ def test_ensure_lb_restarts_dead_lb(monkeypatch):
     killed = []
     monkeypatch.setattr(service, '_spawn_load_balancer', lambda *a, **k: new_lb)
     monkeypatch.setattr(
-        subprocess_utils, 'kill_children_processes',
+        subprocess_utils,
+        'kill_children_processes',
         lambda parent_pids, force=False: killed.extend(parent_pids))
-    out = service._ensure_load_balancer(_FakeProc(alive=False, pid=1),
-                                        'http://h:1', 30001, _spec(),
-                                        '/tmp/lb.log')
+    out = service._ensure_load_balancer(_FakeProc(alive=False,
+                                                  pid=1), 'http://h:1', 30001,
+                                        _spec(), '/tmp/lb.log')
     assert out is new_lb
     assert 1 in killed
 
 
 def test_ensure_lb_spawn_failure_is_contained(monkeypatch):
+
     def _boom(*a, **k):
         raise OSError('cannot start')
 
