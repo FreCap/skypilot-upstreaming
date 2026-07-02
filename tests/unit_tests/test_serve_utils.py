@@ -513,7 +513,9 @@ class TestTerminateOrphanedServiceRowPurge:
         mock_purge.assert_not_called()
 
     def test_no_purge_leaves_orphan_untouched(self):
-        mock_purge = self._run(purge=False, raw_pool=False, requested_pool=False)
+        mock_purge = self._run(purge=False,
+                               raw_pool=False,
+                               requested_pool=False)
         mock_purge.assert_not_called()
 
 
