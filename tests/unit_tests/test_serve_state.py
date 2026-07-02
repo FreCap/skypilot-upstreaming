@@ -121,19 +121,16 @@ class TestAddServiceAtomicRegistration:
     with no version row -- invisible to the latest-version INNER JOIN, so it
     could never be recovered, removed, or have its name reused."""
 
-    def test_service_is_visible_via_join(self, _mock_serve_db):
+    def test_registration_is_visible_via_join(self, _mock_serve_db):
         # The whole point: after the atomic write, the service is reachable
-        # through get_service_from_name (which INNER-JOINs version_specs).
+        # through get_service_from_name (which INNER-JOINs version_specs),
+        # with its initial version row in place.
         assert _add_minimal_service('svc-atomic') is True
-        record = serve_state.get_service_from_name('svc-atomic')
-        assert record is not None
-
-    def test_writes_initial_version_row(self, _mock_serve_db):
-        _add_minimal_service('svc-ver')
-        assert (serve_state.get_latest_version('svc-ver') ==
+        assert serve_state.get_service_from_name('svc-atomic') is not None
+        assert (serve_state.get_latest_version('svc-atomic') ==
                 serve_constants.INITIAL_VERSION)
         assert serve_state.get_yaml_content(
-            'svc-ver', serve_constants.INITIAL_VERSION) == 'yaml: v1'
+            'svc-atomic', serve_constants.INITIAL_VERSION) == 'yaml: v1'
 
     def test_duplicate_does_not_write_second_version_row(self, _mock_serve_db):
         assert _add_minimal_service('svc-dup') is True
