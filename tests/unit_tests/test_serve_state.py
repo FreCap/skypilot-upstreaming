@@ -337,23 +337,15 @@ class TestRecoveryVersionSelection:
     `get_latest_committed_version` skips the placeholder."""
 
     def test_committed_version_skips_placeholder(self, _mock_serve_db):
-        # v1 committed (yaml persisted), then an interrupted update creates a
-        # NULL-yaml placeholder v2 as the new MAX.
-        serve_state.add_or_update_version('svc', 1, 'spec-1', 'yaml: v1')
-        placeholder = serve_state.add_version('svc')
-        assert placeholder == 2
-        # Raw MAX points at the placeholder (the bug)...
-        assert serve_state.get_latest_version('svc') == 2
-        # ...but recovery must pick the last committed version.
-        assert serve_state.get_latest_committed_version('svc') == 1
-
-    def test_committed_version_is_latest_committed_not_first(
-            self, _mock_serve_db):
-        # Multiple committed updates then an interrupted one: recovery resumes
-        # the newest committed version, not the original.
+        # Two committed versions, then an interrupted update creates a
+        # NULL-yaml placeholder v3 as the new MAX.
         serve_state.add_or_update_version('svc', 1, 'spec-1', 'yaml: v1')
         serve_state.add_or_update_version('svc', 2, 'spec-2', 'yaml: v2')
-        serve_state.add_version('svc')  # placeholder v3
+        assert serve_state.add_version('svc') == 3  # placeholder
+        # Raw MAX points at the placeholder (the bug)...
+        assert serve_state.get_latest_version('svc') == 3
+        # ...but recovery must pick the newest committed version, not the
+        # placeholder and not the original.
         assert serve_state.get_latest_committed_version('svc') == 2
 
     def test_committed_version_none_when_only_placeholder(self, _mock_serve_db):

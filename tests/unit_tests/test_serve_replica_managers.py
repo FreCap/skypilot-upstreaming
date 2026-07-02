@@ -104,10 +104,10 @@ class TestSkyPilotReplicaManagerInitOrdering:
         started_targets = []
 
         # The three control loops are launched via
-        # thread_utils.start_supervised_thread(target, name) (the #9 thread
-        # supervisor), not threading.Thread directly, so capture the supervised
-        # target's name from there. Patching threading.Thread would only ever
-        # see the supervisor wrapper (_supervise), not the real methods.
+        # thread_utils.start_supervised_thread(target, name), not
+        # threading.Thread directly, so capture the supervised target's name
+        # from there. Patching threading.Thread would only ever see the
+        # supervisor wrapper (_supervise), not the real methods.
         with mock.patch.object(
                 replica_managers.ReplicaManager, '__init__',
                 return_value=None), \
