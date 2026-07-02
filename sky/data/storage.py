@@ -4631,9 +4631,32 @@ class OciStore(AbstractStore):
                 f'Upload failed for store {self.name}') from e
 
     def delete(self) -> None:
+        # When the bucket is user-provided (not Sky-managed) and only a
+        # sub-path was mounted, delete only that sub-path -- never the whole
+        # bucket. This mirrors the guard every other store has; without it,
+        # tearing down a job/service that used an existing `oci://` bucket via
+        # `jobs.bucket` / `serve.bucket` would empty and delete the entire
+        # user-owned bucket (and all sibling data in it).
+        if self._bucket_sub_path is not None and not self.is_sky_managed:
+            return self._delete_sub_path()
+
         deleted_by_skypilot = self._delete_oci_bucket(self.name)
         if deleted_by_skypilot:
             msg_str = f'Deleted OCI bucket {self.name}.'
+        else:
+            msg_str = (f'OCI bucket {self.name} may have been deleted '
+                       f'externally. Removing from local state.')
+        logger.info(f'{colorama.Fore.GREEN}{msg_str}'
+                    f'{colorama.Style.RESET_ALL}')
+
+    def _delete_sub_path(self) -> None:
+        """Removes objects under the mounted sub-path, leaving the bucket."""
+        assert self._bucket_sub_path is not None, 'bucket_sub_path is not set'
+        deleted_by_skypilot = self._delete_oci_bucket_sub_path(
+            self.name, self._bucket_sub_path)
+        if deleted_by_skypilot:
+            msg_str = (f'Removed objects from OCI bucket '
+                       f'{self.name}/{self._bucket_sub_path}.')
         else:
             msg_str = (f'OCI bucket {self.name} may have been deleted '
                        f'externally. Removing from local state.')
@@ -4886,9 +4909,10 @@ class OciStore(AbstractStore):
 
         @oci.with_oci_env
         def get_bucket_delete_command(bucket_name):
-            remove_command = (f'oci os bucket delete --bucket-name '
+            remove_command = (f'oci os bucket delete '
+                              f'--bucket-name {bucket_name} '
                               f'--region {self.region} '
-                              f'{bucket_name} --empty --force')
+                              f'--empty --force')
 
             return remove_command
 
@@ -4897,8 +4921,12 @@ class OciStore(AbstractStore):
         try:
             with rich_utils.safe_status(
                     f'[bold cyan]Deleting OCI bucket {bucket_name}[/]'):
-                subprocess.check_output(remove_command.split(' '),
-                                        stderr=subprocess.STDOUT)
+                # `with_oci_env` returns a single `&&`-joined shell command
+                # (venv setup + `source` + the oci call), so it must run
+                # through a shell.
+                subprocess.check_output(remove_command,
+                                        stderr=subprocess.STDOUT,
+                                        shell=True)
         except subprocess.CalledProcessError as e:
             if 'BucketNotFound' in e.output.decode('utf-8'):
                 logger.debug(
@@ -4910,6 +4938,61 @@ class OciStore(AbstractStore):
                 with ux_utils.print_exception_no_traceback():
                     raise exceptions.StorageBucketDeleteError(
                         f'Failed to delete OCI bucket {bucket_name}.')
+        return True
+
+    def _delete_oci_bucket_sub_path(self, bucket_name: str,
+                                    sub_path: str) -> bool:
+        """Deletes objects under a prefix in an OCI bucket.
+
+        Unlike `_delete_oci_bucket`, this removes only the objects under
+        `sub_path` and leaves the (user-owned) bucket itself intact.
+
+        Args:
+          bucket_name: str; Name of bucket
+          sub_path: str; Prefix whose objects should be removed
+
+        Returns:
+         bool; True if the objects were deleted, False if the bucket was
+         deleted externally.
+        """
+        logger.debug(f'_delete_oci_bucket_sub_path: {bucket_name}/{sub_path}')
+        prefix = sub_path.strip('/')
+
+        @oci.with_oci_env
+        def get_bulk_delete_command(bucket_name, prefix):
+            remove_command = (f'oci os object bulk-delete '
+                              f'--namespace-name {self.namespace} '
+                              f'--bucket-name {bucket_name} '
+                              f'--region {self.region} '
+                              f'--prefix "{prefix}/" --force')
+
+            return remove_command
+
+        remove_command = get_bulk_delete_command(bucket_name, prefix)
+
+        try:
+            with rich_utils.safe_status(
+                    f'[bold cyan]Deleting objects under prefix {prefix} in OCI '
+                    f'bucket {bucket_name}[/]'):
+                # `with_oci_env` returns a single `&&`-joined shell command
+                # (venv setup + `source` + the oci call), so it must run
+                # through a shell -- the same way `_download_file` runs its
+                # wrapped command.
+                subprocess.check_output(remove_command,
+                                        stderr=subprocess.STDOUT,
+                                        shell=True)
+        except subprocess.CalledProcessError as e:
+            if 'BucketNotFound' in e.output.decode('utf-8'):
+                logger.debug(
+                    _BUCKET_EXTERNALLY_DELETED_DEBUG_MESSAGE.format(
+                        bucket_name=bucket_name))
+                return False
+            else:
+                logger.error(e.output)
+                with ux_utils.print_exception_no_traceback():
+                    raise exceptions.StorageBucketDeleteError(
+                        f'Failed to delete objects under prefix {sub_path} in '
+                        f'OCI bucket {bucket_name}.')
         return True
 
 

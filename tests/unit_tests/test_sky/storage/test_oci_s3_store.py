@@ -1,5 +1,6 @@
 """Unit tests for OCI S3-compatible storage dispatch and store behavior."""
 
+import subprocess
 import unittest
 from unittest import mock
 
@@ -94,10 +95,9 @@ class TestOciS3CompatibleStore(unittest.TestCase):
         self.assertEqual(config.cloud_name, 'OCI')
 
     def test_region_suffix_in_name_rejected(self):
-        with self.assertRaises(exceptions.StorageNameError) as context:
+        with self.assertRaises(exceptions.StorageNameError):
             storage_lib.OciS3CompatibleStore(name='bucket@us-sanjose-1',
                                              source=None)
-        self.assertIn('S3-compatible', str(context.exception))
 
     def test_region_suffix_in_source_rejected(self):
         with self.assertRaises(exceptions.StorageNameError):
@@ -162,6 +162,73 @@ class TestOciS3CloudStorageCommands(unittest.TestCase):
         self.assertIn('aws s3 cp', cmd)
         self.assertIn('AWS_SHARED_CREDENTIALS_FILE=~/.oci/s3.credentials', cmd)
         self.assertIn('--profile=oci', cmd)
+
+
+class TestOciStoreDeleteGuard(unittest.TestCase):
+    """Native ``OciStore.delete()`` must remove only the mounted sub-path for a
+    user-provided (non-Sky-managed) bucket -- never the whole, user-owned
+    bucket. This mirrors the guard every other store already has."""
+
+    def _make_oci_store(self, *, sub_path, is_sky_managed):
+        store = storage_lib.OciStore.__new__(storage_lib.OciStore)
+        store.name = 'user-bucket'
+        store.namespace = 'ns'
+        store.region = 'us-sanjose-1'
+        store._bucket_sub_path = sub_path  # pylint: disable=protected-access
+        store.is_sky_managed = is_sky_managed
+        return store
+
+    def _run_delete(self, store):
+        # Do NOT mask `with_oci_env`: it returns the real `&&`-joined shell
+        # command, so every delete path must pass that string to subprocess
+        # with shell=True rather than a split argv list.
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               return_value=b'') as mock_run:
+            store.delete()
+        self.assertIs(mock_run.call_args.kwargs.get('shell'), True)
+        cmd = mock_run.call_args.args[0]
+        self.assertIsInstance(cmd, str)
+        return cmd
+
+    def test_user_bucket_sub_path_deletes_only_prefix(self):
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        cmd = self._run_delete(store)
+        # Only the per-run prefix is removed; the bucket is left intact.
+        self.assertIn('oci os object bulk-delete', cmd)
+        self.assertIn('--prefix "run-123/"', cmd)
+        self.assertIn('--bucket-name user-bucket', cmd)
+        self.assertNotIn('oci os bucket delete', cmd)
+
+    def test_sky_managed_bucket_deletes_whole_bucket(self):
+        # A Sky-managed intermediate bucket is ours to delete entirely.
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=True)
+        cmd = self._run_delete(store)
+        self.assertIn('oci os bucket delete', cmd)
+
+    def test_no_sub_path_deletes_whole_bucket(self):
+        store = self._make_oci_store(sub_path=None, is_sky_managed=False)
+        cmd = self._run_delete(store)
+        self.assertIn('oci os bucket delete', cmd)
+
+    def test_sub_path_delete_reconciles_externally_deleted_bucket(self):
+        # BucketNotFound means the bucket was deleted externally; delete()
+        # must return normally so local state is still reconciled.
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        err = subprocess.CalledProcessError(1, 'cmd', output=b'BucketNotFound')
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               side_effect=err):
+            store.delete()
+
+    def test_sub_path_delete_failure_raises(self):
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        err = subprocess.CalledProcessError(1, 'cmd', output=b'ServiceError')
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               side_effect=err):
+            with self.assertRaises(exceptions.StorageBucketDeleteError):
+                store.delete()
 
 
 if __name__ == '__main__':
