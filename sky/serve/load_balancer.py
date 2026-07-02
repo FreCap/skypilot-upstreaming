@@ -102,7 +102,8 @@ class SkyServeLoadBalancer:
                             'request_aggregator':
                                 self._request_aggregator.to_dict()
                         },
-                        timeout=aiohttp.ClientTimeout(5),
+                        timeout=aiohttp.ClientTimeout(
+                            constants.LB_CONTROLLER_SYNC_TIMEOUT_SECONDS),
                 ) as response:
                     # Clean up after reporting request info to avoid OOM.
                     self._request_aggregator.clear()

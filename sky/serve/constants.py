@@ -37,6 +37,13 @@ SERVICE_REGISTER_TIMEOUT_SECONDS = 60
 # interval.
 LB_CONTROLLER_SYNC_INTERVAL_SECONDS = 20
 
+# The timeout in seconds for the load balancer to sync with the controller.
+# The controller's load_balancer_sync handler can be slow under a launch storm
+# (the launch threads contend on the same database); a timeout that is too
+# tight makes the sync fail, leaving the load balancer with an empty
+# ready-replica list so it 503s every request even when READY replicas exist.
+LB_CONTROLLER_SYNC_TIMEOUT_SECONDS = 30
+
 # The maximum retry times for load balancer for each request. After changing to
 # proxy implementation, we do retry for failed requests.
 # TODO(tian): Expose this option to users in yaml file.
