@@ -4909,9 +4909,10 @@ class OciStore(AbstractStore):
 
         @oci.with_oci_env
         def get_bucket_delete_command(bucket_name):
-            remove_command = (f'oci os bucket delete --bucket-name '
+            remove_command = (f'oci os bucket delete '
+                              f'--bucket-name {bucket_name} '
                               f'--region {self.region} '
-                              f'{bucket_name} --empty --force')
+                              f'--empty --force')
 
             return remove_command
 
@@ -4920,8 +4921,12 @@ class OciStore(AbstractStore):
         try:
             with rich_utils.safe_status(
                     f'[bold cyan]Deleting OCI bucket {bucket_name}[/]'):
-                subprocess.check_output(remove_command.split(' '),
-                                        stderr=subprocess.STDOUT)
+                # `with_oci_env` returns a single `&&`-joined shell command
+                # (venv setup + `source` + the oci call), so it must run
+                # through a shell.
+                subprocess.check_output(remove_command,
+                                        stderr=subprocess.STDOUT,
+                                        shell=True)
         except subprocess.CalledProcessError as e:
             if 'BucketNotFound' in e.output.decode('utf-8'):
                 logger.debug(
