@@ -6,8 +6,7 @@ request DB + logs; the executor child processes that ran those requests died
 with the previous process. A request still PENDING/WAITING/RUNNING -- e.g. a
 long provisioning launch -- was therefore silently dropped: the caller saw the
 request vanish, and any half-provisioned cluster leaked until a later status
-refresh. The boltz long-worker-pool widening admits more concurrent launches,
-so each restart orphans proportionally more of them.
+refresh.
 
 ``_log_orphaned_inflight_requests`` is the minimal mitigation: detect and loudly
 log the orphaned requests before the wipe so the drop is alertable and the
