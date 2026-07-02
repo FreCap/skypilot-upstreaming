@@ -60,9 +60,13 @@ def test_logs_each_orphaned_inflight_request(monkeypatch):
 
     # One summary warning plus one warning per orphaned request.
     assert len(warnings) == 1 + len(reqs)
-    # The scan must filter to only active (in-flight) statuses.
+    # The scan must filter to only active (in-flight) statuses, and must not
+    # select the pickled columns, whose decode can fail across an upgrade.
     req_filter = backend.filters[0]
     assert req_filter.status == requests_lib.RequestStatus.active_statuses()
+    assert set(req_filter.fields) == {
+        'request_id', 'name', 'status', 'cluster_name'
+    }
 
 
 def test_no_orphans_no_warning(monkeypatch):

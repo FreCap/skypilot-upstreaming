@@ -636,9 +636,14 @@ def _log_orphaned_inflight_requests() -> None:
     block startup.
     """
     try:
+        # Select only the plain columns needed for the log: the rows were
+        # written by the previous server version, and unpickling entrypoint
+        # or request_body can fail across an upgrade, which would silence
+        # the entire report.
         orphaned = request_storage.get_request_backend().query_requests(
             req_filter=RequestTaskFilter(
-                status=RequestStatus.active_statuses()))
+                status=RequestStatus.active_statuses(),
+                fields=['request_id', 'name', 'status', COL_CLUSTER_NAME]))
     except Exception as e:  # pylint: disable=broad-except
         logger.debug('Could not scan for orphaned in-flight requests during '
                      f'API server startup (continuing): {e}')
