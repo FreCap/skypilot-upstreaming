@@ -15,6 +15,7 @@ scan failure never blocks startup.
 """
 import types
 
+from sky.server import daemons
 from sky.server.requests import requests as requests_lib
 from sky.server.requests import storage as request_storage
 
@@ -67,6 +68,22 @@ def test_logs_each_orphaned_inflight_request(monkeypatch):
     assert set(req_filter.fields) == {
         'request_id', 'name', 'status', 'cluster_name'
     }
+
+
+def test_daemon_requests_are_not_reported(monkeypatch):
+    # Internal daemon requests sit in RUNNING for the server's whole life and
+    # are recreated on every startup: they are not dropped work.
+    daemon_reqs = [
+        _FakeReq(daemon.id, daemon.name, 'RUNNING')
+        for daemon in daemons.INTERNAL_REQUEST_DAEMONS
+    ]
+    monkeypatch.setattr(request_storage, 'get_request_backend',
+                        lambda: _FakeBackend(daemon_reqs))
+    warnings = _capture_warnings(monkeypatch)
+
+    requests_lib._log_orphaned_inflight_requests()
+
+    assert warnings == []
 
 
 def test_no_orphans_no_warning(monkeypatch):

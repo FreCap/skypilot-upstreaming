@@ -648,6 +648,13 @@ def _log_orphaned_inflight_requests() -> None:
         logger.debug('Could not scan for orphaned in-flight requests during '
                      f'API server startup (continuing): {e}')
         return
+    # Internal daemon requests sit in RUNNING for the whole life of the
+    # server and are recreated on every startup, so their rows are not
+    # dropped work; skip them like the other kill paths do.
+    orphaned = [
+        req for req in orphaned
+        if not daemons.is_daemon_request_id(req.request_id)
+    ]
     if not orphaned:
         return
     logger.warning(
