@@ -60,7 +60,6 @@ from sky import skypilot_config
 from sky.adaptors import common as adaptors_common
 from sky.client import sdk
 from sky.jobs import constants as managed_job_constants
-from sky.jobs import file_content_utils
 from sky.jobs import state
 from sky.jobs import utils as managed_job_utils
 from sky.skylet import constants
@@ -399,10 +398,19 @@ async def scheduled_launch(
     # For JobGroups, multiple tasks share the same job_id but each launches
     # a different cluster in parallel. We handle scheduler state at the group
     # level in _run_job_group(), so bypass per-task scheduling here.
-    # Check if job is a JobGroup by examining the DAG YAML content.
+    # JobGroup-ness is fixed at submission and recorded in the slim
+    # job_info.execution column ('parallel' == JobGroup), so read that instead
+    # of fetching + re-parsing the full DAG YAML on every launch/recovery
+    # attempt. The column can be NULL (writers pass execution=None explicitly,
+    # bypassing the 'serial' server_default, and legacy-version codegen omits
+    # it), but no NULL row can be a JobGroup: every JobGroup-capable writer
+    # records 'parallel', and JobGroups did not exist before the migration
+    # that added the column. is_job_group_execution(None) is False, so NULL
+    # rows and unknown job_ids match the previous behavior
+    # (get_job_dag_content returned None -> not a JobGroup).
     # TODO(zhwu): make JobGroup scheduler aware.
-    dag_content = file_content_utils.get_job_dag_content(job_id)
-    if dag_content is not None and dag_utils.is_job_group_yaml_str(dag_content):
+    execution = state.get_execution_from_job_id(job_id)
+    if dag_utils.is_job_group_execution(execution):
         yield
         return
 

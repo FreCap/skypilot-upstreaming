@@ -602,6 +602,18 @@ def controller_process_alive(record: managed_job_state.ControllerPidRecord,
         return False
 
 
+def _controller_is_restarting() -> bool:
+    """Whether a controller process is being restarted under us.
+
+    The signal file is created while the controller is recovering from a
+    failure (see sky/templates/kubernetes-ray.yml.j2). While it is present,
+    update_managed_jobs_statuses must NOT mark jobs FAILED_CONTROLLER -- the
+    controller process the job depends on is being restarted, not gone for good.
+    """
+    return os.path.exists(
+        os.path.expanduser(constants.PERSISTENT_RUN_RESTARTING_SIGNAL_FILE))
+
+
 def update_managed_jobs_statuses(job_id: Optional[int] = None):
     """Update managed job status if the controller process failed abnormally.
 
@@ -614,16 +626,14 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
     Note: we expect that job_id, if provided, refers to a nonterminal job or a
     job that has not completed its cleanup (schedule state not DONE).
     """
-    # This signal file suggests that the controller is recovering from a
+    # The signal file suggests that the controller is recovering from a
     # failure. See sky/templates/kubernetes-ray.yml.j2 for more details.
     # When restarting the controller processes, we don't want this event to
     # set the job status to FAILED_CONTROLLER.
     # TODO(tian): Change this to restart the controller process. For now we
     # disabled it when recovering because we want to avoid caveats of infinite
     # restart of last controller process that fully occupied the controller VM.
-    if os.path.exists(
-            os.path.expanduser(
-                constants.PERSISTENT_RUN_RESTARTING_SIGNAL_FILE)):
+    if _controller_is_restarting():
         return
 
     def _cleanup_job_clusters(job_id: int) -> Optional[str]:
@@ -666,18 +676,29 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         # that need to be checked.
         return
 
+    # Fetch the small per-job fields the loop needs for ALL jobs in one slim
+    # query instead of a heavyweight get_managed_job_tasks() join per job (a
+    # 1+N pattern that pulled large YAML/metadata blobs + json.loads on every
+    # refresh tick -- this sweep runs from ManagedJobEvent, i.e. roughly every
+    # EVENT_INTERVAL_SECONDS=300s).
+    jobs_info = managed_job_state.get_jobs_status_check_info(job_ids)
     for job_id in job_ids:
         assert job_id is not None
-        tasks = managed_job_state.get_managed_job_tasks(job_id)
+        info = jobs_info.get(job_id)
+        if info is None:
+            # No task rows for this job (e.g. it was removed between
+            # get_jobs_to_check_status and now); nothing to check.
+            continue
+        tasks = info['tasks']
         # Note: controller_pid and schedule_state are in the job_info table
         # which is joined to the spot table, so all tasks with the same job_id
-        # will have the same value for these columns. This is what lets us just
-        # take tasks[0]['controller_pid'] and tasks[0]['schedule_state'].
-        schedule_state = tasks[0]['schedule_state']
+        # share these columns. get_jobs_status_check_info returns them once per
+        # job.
+        schedule_state = info['schedule_state']
 
         # Handle jobs with schedule state (non-legacy jobs):
-        pid = tasks[0]['controller_pid']
-        pid_started_at = tasks[0].get('controller_pid_started_at')
+        pid = info['controller_pid']
+        pid_started_at = info['controller_pid_started_at']
         if schedule_state == managed_job_state.ManagedJobScheduleState.DONE:
             # There are two cases where we could get a job that is DONE.
             # 1. At query time (get_jobs_to_check_status), the job was not yet
@@ -698,6 +719,18 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
             failure_reason = ('Inconsistent internal job state. This is a bug.')
         elif pid is None:
             # Non-legacy job and controller process has not yet started.
+            if (schedule_state in [
+                    managed_job_state.ManagedJobScheduleState.INACTIVE,
+                    managed_job_state.ManagedJobScheduleState.WAITING,
+            ]):
+                # It is expected that the controller hasn't been started yet.
+                # The controller process has not run, so there is no controller
+                # status to read; skip the per-job filelock + SQLite read in
+                # job_lib.get_status(). This is the common backlog state under a
+                # large submission fan-out, so avoiding it per job per refresh
+                # tick removes a lock acquisition + DB query for every pending
+                # job.
+                continue
             controller_status = job_lib.get_status(job_id)
             if controller_status == job_lib.JobStatus.FAILED_SETUP:
                 # We should fail the case where the controller status is
@@ -707,12 +740,6 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
                 # status is FAILED_DRIVER or FAILED.
                 logger.error('Failed to setup the cloud dependencies for '
                              'the managed job.')
-            elif (schedule_state in [
-                    managed_job_state.ManagedJobScheduleState.INACTIVE,
-                    managed_job_state.ManagedJobScheduleState.WAITING,
-            ]):
-                # It is expected that the controller hasn't been started yet.
-                continue
             elif (schedule_state ==
                   managed_job_state.ManagedJobScheduleState.LAUNCHING):
                 # This is unlikely but technically possible. There's a brief
@@ -751,17 +778,61 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
 
         # At this point, either pid is None or process is dead.
 
+        # The judgment above was made from the batched snapshot taken before
+        # the loop, which can be minutes stale by now (each earlier iteration
+        # that reaches the destructive path synchronously terminates a
+        # cluster). In that window the job may have been reset for recovery
+        # (schedule_state=WAITING, pid cleared; see reset_jobs_for_recovery)
+        # or re-claimed by a new controller process. Only act if a fresh read
+        # confirms the exact values the judgment was based on; otherwise defer
+        # to the next status-update cycle, which will re-judge the job from
+        # fresh state.
+        fresh_infos = managed_job_state.get_jobs_status_check_info([job_id])
+        fresh_info = fresh_infos.get(job_id)
+        if (fresh_info is None or
+                fresh_info['schedule_state'] != schedule_state or
+                fresh_info['controller_pid'] != pid or
+                fresh_info['controller_pid_started_at'] != pid_started_at):
+            logger.info(f'Job {job_id} schedule state or controller pid '
+                        'changed since the status snapshot was taken; '
+                        'deferring to the next status update cycle.')
+            continue
+
         # The controller process for this managed job is not running: it must
         # have exited abnormally, and we should set the job status to
         # FAILED_CONTROLLER.
         logger.error(f'Controller process for job {job_id} has exited '
                      'abnormally. Setting the job status to FAILED_CONTROLLER.')
 
+        # Re-check the restart signal right before the destructive action. The
+        # top-of-function check is a stale snapshot: marking many jobs takes
+        # time, and a controller restart (which creates the signal file) can
+        # begin in that window. Acting on the stale snapshot would terminate
+        # this job's cluster and mark it FAILED_CONTROLLER while its controller
+        # is being restarted under it -- losing a job that would otherwise
+        # resume.
+        if _controller_is_restarting():
+            logger.info(
+                f'Controller restart in progress; deferring FAILED_CONTROLLER '
+                f'for job {job_id} (will re-check on the next status update).')
+            continue
+
         # Cleanup clusters and capture any errors.
         cleanup_error = _cleanup_job_clusters(job_id)
         cleanup_error_msg = ''
         if cleanup_error:
             cleanup_error_msg = f'Also, cleanup failed: {cleanup_error}. '
+
+        # Cluster teardown can take minutes, so a restart can begin while it
+        # runs. The cluster is gone either way, but the terminal set_failed
+        # below is what makes the job unrecoverable -- defer it so a restarted
+        # controller can resume the job (recovery relaunches the cluster).
+        if _controller_is_restarting():
+            logger.info(
+                f'Controller restart began during cluster cleanup; deferring '
+                f'FAILED_CONTROLLER for job {job_id} (will re-check on the '
+                f'next status update).')
+            continue
 
         # Set all tasks to FAILED_CONTROLLER, regardless of current status.
         # This may change a job from SUCCEEDED or another terminal state to
