@@ -49,8 +49,9 @@ logger = sky_logging.init_logger(__name__)
 _JOB_STATUS_FETCH_INTERVAL = 30
 _PROCESS_POOL_REFRESH_INTERVAL = 20
 _RETRY_INIT_GAP_SECONDS = 60
-# Default retries for launch_cluster. Spot replicas with a placer override this
-# to 1 so a capacity failure fails over to a new location immediately instead of
+# Default number of launch attempts for launch_cluster. Spot replicas with a
+# spot placer cap resource availability (capacity) failures at one attempt so
+# the placer can fail over to a different location immediately instead of
 # re-hammering the same exhausted zone (see _launch_replica).
 _DEFAULT_LAUNCH_MAX_RETRY = 3
 _DEFAULT_DRAIN_SECONDS = 120
@@ -84,16 +85,25 @@ def launch_cluster(replica_id: int,
                        int, bool],
                    resources_override: Optional[Dict[str, Any]] = None,
                    retry_until_up: bool = True,
-                   max_retry: int = _DEFAULT_LAUNCH_MAX_RETRY) -> None:
+                   max_retry: int = _DEFAULT_LAUNCH_MAX_RETRY,
+                   availability_max_retry: Optional[int] = None) -> None:
     """Launch a sky serve replica cluster.
 
     This function will not wait for the job starts running. It will return
     immediately after the job is submitted.
 
+    Launch failures are retried in place with backoff, up to max_retry
+    attempts. Failures caused by resource availability (capacity) are capped
+    separately by availability_max_retry, defaulting to max_retry. Spot
+    replicas with a spot placer pass availability_max_retry=1 so a capacity
+    failure at the placer-pinned location propagates immediately and the
+    placer fails over to a different location, while other (transient) errors
+    keep the max_retry in-place attempts.
+
     Raises:
-        RuntimeError: If failed to launch the cluster after max_retry retries,
-            or some error happened before provisioning and will happen again
-            if retry.
+        RuntimeError: If failed to launch the cluster after the allowed
+            attempts, or some error happened before provisioning and will
+            happen again if retry.
     """
     ctx = context.get()
     assert ctx is not None, 'Context is not initialized'
@@ -130,7 +140,10 @@ def launch_cluster(replica_id: int,
             replica_to_launch_cancelled.pop(replica_id)
         return is_cancelled
 
+    if availability_max_retry is None:
+        availability_max_retry = max_retry
     retry_cnt = 0
+    availability_retry_cnt = 0
     backoff = common_utils.Backoff(_RETRY_INIT_GAP_SECONDS)
     while True:
         retry_cnt += 1
@@ -160,6 +173,7 @@ def launch_cluster(replica_id: int,
                     for err in e.failover_history):
                 raise RuntimeError('Failed to launch the sky serve replica '
                                    f'cluster {cluster_name}.') from e
+            availability_retry_cnt += 1
             logger.info('Failed to launch the sky serve replica cluster with '
                         f'error: {common_utils.format_exception(e)})')
         except Exception as e:  # pylint: disable=broad-except
@@ -178,9 +192,10 @@ def launch_cluster(replica_id: int,
             return
         terminate_cluster(cluster_name, log_file=log_file)
 
-        if retry_cnt >= max_retry:
+        if (retry_cnt >= max_retry or
+                availability_retry_cnt >= availability_max_retry):
             raise RuntimeError('Failed to launch the sky serve replica cluster '
-                               f'{cluster_name} after {max_retry} retries.')
+                               f'{cluster_name} after {retry_cnt} attempt(s).')
 
         gap_seconds = backoff.current_backoff()
         logger.info('Retrying to launch the sky serve replica cluster '
@@ -906,22 +921,22 @@ class SkyPilotReplicaManager(ReplicaManager):
                 current_spot_locations)
             resources_override.update(location.to_dict())
         # When the spot placer owns failover (use_spot + placer above sets
-        # retry_until_up=False), the launch is pinned to ONE location. Retrying
-        # that same location with the default max_retry=3 + 60s exponential
-        # backoff burns minutes re-hammering an exhausted zone
-        # (ZONE_RESOURCE_POOL_EXHAUSTED / InsufficientInstanceCapacity) before
-        # the failure propagates to set_preemptive. Fail fast (one attempt) so
-        # the placer marks the location preemptive and the next launch picks a
-        # different location immediately — the failover the placer is meant to
-        # do, per the retry_until_up=False comment above.
-        launch_max_retry = (1 if use_spot and self._spot_placer is not None
-                            else _DEFAULT_LAUNCH_MAX_RETRY)
+        # retry_until_up=False), the launch is pinned to ONE location, so a
+        # capacity failure there must propagate immediately for the placer to
+        # mark the location preemptive and pick a different one on the next
+        # launch. Retrying the same exhausted zone in place with the default
+        # attempts + 60s exponential backoff burns minutes before failing
+        # over. Other (transient) launch errors say nothing about the
+        # location's capacity, so they keep the default in-place retries.
+        availability_max_retry = (1 if use_spot and
+                                  self._spot_placer is not None else None)
         t = thread_utils.SafeThread(
             target=launch_cluster,
             args=(replica_id, self.yaml_content, cluster_name, log_file_name,
                   self._replica_to_request_id,
                   self._replica_to_launch_cancelled, resources_override,
-                  retry_until_up, launch_max_retry),
+                  retry_until_up),
+            kwargs={'availability_max_retry': availability_max_retry},
         )
         replica_port = _get_resources_ports(self.yaml_content)
 
