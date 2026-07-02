@@ -400,12 +400,21 @@ def add_service_with_initial_version(
                     controller_ip=controller_ip,
                     hash=str(uuid.uuid4()),
                     entrypoint=entrypoint))
+            version_insert_stmt = insert_func(version_specs_table).values(
+                service_name=name,
+                version=version,
+                spec=pickle.dumps(spec),
+                yaml_content=yaml_content)
+            # Upsert (like `add_or_update_version`): a stale version row with
+            # no `services` row, left behind by an interrupted teardown on an
+            # older controller, must not block re-registration of the name.
             session.execute(
-                insert_func(version_specs_table).values(
-                    service_name=name,
-                    version=version,
-                    spec=pickle.dumps(spec),
-                    yaml_content=yaml_content))
+                version_insert_stmt.on_conflict_do_update(
+                    index_elements=['service_name', 'version'],
+                    set_={
+                        'spec': version_insert_stmt.excluded.spec,
+                        'yaml_content': version_insert_stmt.excluded.yaml_content
+                    }))
             session.commit()
 
     except sqlalchemy_exc.IntegrityError as e:

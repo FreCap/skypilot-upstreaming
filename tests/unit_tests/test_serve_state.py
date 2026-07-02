@@ -160,26 +160,20 @@ class TestAddServiceWithInitialVersion:
         _add_atomic_service('svc-whole')
         assert serve_state.get_service_from_name('svc-whole') is not None
 
-    def test_rolls_back_services_row_if_version_insert_fails(
-            self, _mock_serve_db):
-        # Pre-seed a conflicting initial version row (with no services row), so
-        # the version insert inside the atomic write hits a duplicate-PK error.
-        # A version_specs conflict is not the services-name uniqueness the
-        # helper converts to False, so the call raises -- but the services
-        # insert in the SAME transaction must still roll back. The whole point
-        # is that a failure can never leave the half-written orphan (a services
-        # row with no version row).
-        serve_state.add_or_update_version('svc-rollback',
+    def test_overwrites_stale_version_row(self, _mock_serve_db):
+        # A stale initial version row with no services row (left behind by an
+        # interrupted teardown on an older controller) must not block
+        # re-registration of the name: the initial version write is an upsert,
+        # matching the old add_or_update_version semantics.
+        serve_state.add_or_update_version('svc-stale',
                                           serve_constants.INITIAL_VERSION,
-                                          'spec', 'yaml: v1')
-        assert _read_row(_mock_serve_db, 'svc-rollback') is None  # no svc row
+                                          None, 'yaml: stale')
+        assert _read_row(_mock_serve_db, 'svc-stale') is None  # no svc row
 
-        with pytest.raises(RuntimeError):
-            _add_atomic_service('svc-rollback')
-
-        # The services insert was rolled back: still no services row, so the
-        # name is not wedged and no invisible orphan was created.
-        assert _read_row(_mock_serve_db, 'svc-rollback') is None
+        assert _add_atomic_service('svc-stale') is True
+        assert serve_state.get_service_from_name('svc-stale') is not None
+        assert serve_state.get_yaml_content(
+            'svc-stale', serve_constants.INITIAL_VERSION) == 'yaml: v1'
 
     def test_get_service_pool_from_db_sees_bare_row(self, _mock_serve_db):
         # The raw-pool accessor must read a version-less row (the orphan case)
