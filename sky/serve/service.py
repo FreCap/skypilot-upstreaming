@@ -868,16 +868,9 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
             # NOTE(tian): We don't need the load balancer for pool.
             # Skip the load balancer process for pool.
             if not service_spec.pool:
-                load_balancer_process = multiprocessing.Process(
-                    target=ux_utils.RedirectOutputForProcess(
-                        load_balancer.run_load_balancer,
-                        load_balancer_log_file).run,
-                    args=(controller_addr, load_balancer_port,
-                          service_spec.load_balancing_policy,
-                          service_spec.tls_credential,
-                          service_spec.target_qps_per_replica,
-                          service_spec.lb_stream_timeout_seconds))
-                load_balancer_process.start()
+                load_balancer_process = _spawn_load_balancer(
+                    controller_addr, load_balancer_port, service_spec,
+                    load_balancer_log_file)
 
             if not is_recovery:
                 serve_state.set_service_load_balancer_port(
