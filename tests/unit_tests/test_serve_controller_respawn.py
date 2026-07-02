@@ -59,7 +59,7 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
     monkeypatch.setattr(common_utils, 'find_free_port', lambda start: _PORT)
     monkeypatch.setattr(serve_state, 'set_service_controller_port',
                         lambda name, port: None)
-    monkeypatch.setattr(serve_state, 'get_latest_version',
+    monkeypatch.setattr(serve_state, 'get_latest_committed_version',
                         lambda name: latest_version)
     monkeypatch.setattr(serve_state, 'get_spec',
                         lambda name, ver: latest_spec)
