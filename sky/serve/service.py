@@ -63,13 +63,12 @@ def _handle_signal(service_name: str) -> None:
                     logger.warning(
                         f'Unknown signal received: {user_signal}. Ignoring.')
                     user_signal = None
-            if user_signal is not None:
+            if user_signal is serve_utils.UserSignal.TERMINATE:
                 # Persist the teardown intent BEFORE consuming the signal so a
                 # crash in this window cannot resurrect the service: HA recovery
                 # then sees either SHUTTING_DOWN (and resumes teardown) or the
                 # still-present signal (and re-fires terminate) -- never a
-                # downed service that comes back up serving. (Only TERMINATE
-                # exists.)
+                # downed service that comes back up serving.
                 serve_state.set_service_status_and_active_versions(
                     service_name, serve_state.ServiceStatus.SHUTTING_DOWN)
             # Remove the signal file, after reading it.
