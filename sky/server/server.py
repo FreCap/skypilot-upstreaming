@@ -186,9 +186,8 @@ async def _try_set_basic_auth_user(request: fastapi.Request):
             continue
         username_encoded = username.encode('utf8')
         db_username_encoded = user.name.encode('utf8')
-        if (username_encoded == db_username_encoded and
-                await asyncio.to_thread(common.crypt_ctx.verify, password,
-                                        user.password)):
+        if (username_encoded == db_username_encoded and await asyncio.to_thread(
+                common.crypt_ctx.verify, password, user.password)):
             request.state.auth_user = user
             break
 

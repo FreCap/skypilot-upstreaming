@@ -11,8 +11,7 @@ from sky.server import config
 @pytest.fixture(autouse=True)
 def _clear_long_worker_cpu_multiplier_env(monkeypatch):
     """Isolate tests from SKYPILOT_LONG_WORKER_CPU_MULTIPLIER in the env."""
-    monkeypatch.delenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR,
-                       raising=False)
+    monkeypatch.delenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR, raising=False)
 
 
 @mock.patch('sky.utils.common_utils.get_mem_size_gb', return_value=8)
