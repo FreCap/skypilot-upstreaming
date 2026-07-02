@@ -1,5 +1,6 @@
 """Unit tests for OCI S3-compatible storage dispatch and store behavior."""
 
+import subprocess
 import unittest
 from unittest import mock
 
@@ -180,16 +181,16 @@ class TestOciStoreDeleteGuard(unittest.TestCase):
 
     def _run_delete(self, store):
         # Do NOT mask `with_oci_env`: it returns the real `&&`-joined shell
-        # command, so the test exercises the actual command shape (the
-        # sub-path delete must run that string through a shell, not split it).
+        # command, so every delete path must pass that string to subprocess
+        # with shell=True rather than a split argv list.
         with mock.patch.object(storage_lib.subprocess,
                                'check_output',
                                return_value=b'') as mock_run:
             store.delete()
-        cmd = mock_run.call_args[0][0]
-        # The sub-path delete passes a shell string (shell=True); the
-        # whole-bucket delete passes a split argv list.
-        return cmd if isinstance(cmd, str) else ' '.join(cmd)
+        self.assertIs(mock_run.call_args.kwargs.get('shell'), True)
+        cmd = mock_run.call_args.args[0]
+        self.assertIsInstance(cmd, str)
+        return cmd
 
     def test_user_bucket_sub_path_deletes_only_prefix(self):
         store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
@@ -211,17 +212,24 @@ class TestOciStoreDeleteGuard(unittest.TestCase):
         cmd = self._run_delete(store)
         self.assertIn('oci os bucket delete', cmd)
 
-    def test_sub_path_delete_runs_through_a_shell(self):
-        # with_oci_env returns a '&&'-joined shell string (venv setup + source +
-        # the oci call), so the sub-path delete must run it with shell=True, not
-        # split it into argv.
+    def test_sub_path_delete_reconciles_externally_deleted_bucket(self):
+        # BucketNotFound means the bucket was deleted externally; delete()
+        # must return normally so local state is still reconciled.
         store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        err = subprocess.CalledProcessError(1, 'cmd', output=b'BucketNotFound')
         with mock.patch.object(storage_lib.subprocess,
                                'check_output',
-                               return_value=b'') as mock_run:
+                               side_effect=err):
             store.delete()
-        self.assertIs(mock_run.call_args.kwargs.get('shell'), True)
-        self.assertIsInstance(mock_run.call_args.args[0], str)
+
+    def test_sub_path_delete_failure_raises(self):
+        store = self._make_oci_store(sub_path='run-123', is_sky_managed=False)
+        err = subprocess.CalledProcessError(1, 'cmd', output=b'ServiceError')
+        with mock.patch.object(storage_lib.subprocess,
+                               'check_output',
+                               side_effect=err):
+            with self.assertRaises(exceptions.StorageBucketDeleteError):
+                store.delete()
 
 
 if __name__ == '__main__':
