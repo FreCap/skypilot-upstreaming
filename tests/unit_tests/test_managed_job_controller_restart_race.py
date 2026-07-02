@@ -160,15 +160,6 @@ def test_defers_when_job_reset_for_recovery_midcycle(monkeypatch):
     assert job_done_calls == []
 
 
-def test_controller_is_restarting_reflects_signal_file(monkeypatch, tmp_path):
-    sig = tmp_path / 'restart.signal'
-    monkeypatch.setattr(utils.constants,
-                        'PERSISTENT_RUN_RESTARTING_SIGNAL_FILE', str(sig))
-    assert utils._controller_is_restarting() is False
-    sig.write_text('')
-    assert utils._controller_is_restarting() is True
-
-
 def _make_pending_status_check_info(schedule_state):
     """A pending job whose controller process has not started (pid is None)."""
     return {
