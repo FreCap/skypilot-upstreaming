@@ -196,7 +196,7 @@ class TestOciStoreDeleteGuard(unittest.TestCase):
         cmd = self._run_delete(store)
         # Only the per-run prefix is removed; the bucket is left intact.
         self.assertIn('oci os object bulk-delete', cmd)
-        self.assertIn('--prefix run-123/', cmd)
+        self.assertIn('--prefix "run-123/"', cmd)
         self.assertIn('--bucket-name user-bucket', cmd)
         self.assertNotIn('oci os bucket delete', cmd)
 

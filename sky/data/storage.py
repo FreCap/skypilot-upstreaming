@@ -4964,7 +4964,7 @@ class OciStore(AbstractStore):
                               f'--namespace-name {self.namespace} '
                               f'--bucket-name {bucket_name} '
                               f'--region {self.region} '
-                              f'--prefix {prefix}/ --force')
+                              f'--prefix "{prefix}/" --force')
 
             return remove_command
 
