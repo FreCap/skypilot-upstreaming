@@ -401,12 +401,13 @@ async def scheduled_launch(
     # JobGroup-ness is fixed at submission and recorded in the slim
     # job_info.execution column ('parallel' == JobGroup), so read that instead
     # of fetching + re-parsing the full DAG YAML on every launch/recovery
-    # attempt. The column is always populated -- it has a 'serial'
-    # server_default, and migration 013 (which introduced both the column and
-    # JobGroups) backfilled every pre-existing row to 'serial', which is correct
-    # because JobGroups did not exist before that migration. An unknown job_id
-    # yields execution=None, and is_job_group_execution(None) is False, matching
-    # the previous behavior (get_job_dag_content returned None -> not a JobGroup).
+    # attempt. The column can be NULL (writers pass execution=None explicitly,
+    # bypassing the 'serial' server_default, and legacy-version codegen omits
+    # it), but no NULL row can be a JobGroup: every JobGroup-capable writer
+    # records 'parallel', and JobGroups did not exist before the migration
+    # that added the column. is_job_group_execution(None) is False, so NULL
+    # rows and unknown job_ids match the previous behavior
+    # (get_job_dag_content returned None -> not a JobGroup).
     # TODO(zhwu): make JobGroup scheduler aware.
     execution = state.get_execution_from_job_id(job_id)
     if dag_utils.is_job_group_execution(execution):

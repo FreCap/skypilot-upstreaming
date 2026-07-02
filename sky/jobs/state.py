@@ -2209,9 +2209,10 @@ def get_pool_from_job_id(job_id: int) -> Optional[str]:
 def get_execution_from_job_id(job_id: int) -> Optional[str]:
     """Get the DAG execution mode ('parallel'/'serial') from the job id.
 
-    Returns None when the job is unknown or was created before the execution
-    column existed (legacy rows). Callers can use this to decide JobGroup-ness
-    without fetching and re-parsing the full DAG YAML.
+    Returns None when the job is unknown or its row has no recorded execution
+    mode (writers may store an explicit NULL, e.g. legacy code paths that
+    predate the column). Callers can use this to decide JobGroup-ness without
+    fetching and re-parsing the full DAG YAML.
     """
     engine = _db_manager.get_engine()
     with orm.Session(engine) as session:
