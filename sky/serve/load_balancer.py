@@ -102,16 +102,8 @@ class SkyServeLoadBalancer:
                             'request_aggregator':
                                 self._request_aggregator.to_dict()
                         },
-                        # [boltz fork] Raise from 5s. Under a launch storm the
-                        # controller's load_balancer_sync handler is slow; a
-                        # tight timeout makes the sync fail, the LB keeps an
-                        # empty ready-list, and it 503s every request despite
-                        # READY replicas. Env-tunable.
                         timeout=aiohttp.ClientTimeout(
-                            int(
-                                os.environ.get(
-                                    'SKYPILOT_LB_CONTROLLER_SYNC_TIMEOUT_SECONDS',
-                                    '30'))),
+                            constants.LB_CONTROLLER_SYNC_TIMEOUT_SECONDS),
                 ) as response:
                     # Clean up after reporting request info to avoid OOM.
                     self._request_aggregator.clear()
