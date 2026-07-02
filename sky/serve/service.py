@@ -405,10 +405,10 @@ def _bail_on_boot_failure(service_name: str,
     os._exit(1)  # pylint: disable=protected-access
 
 
-def _spawn_controller(
-        service_name: str, service_spec: 'service_spec_lib.SkyServiceSpec',
-        version: int, controller_host: str,
-        controller_port: int) -> multiprocessing.Process:
+def _spawn_controller(service_name: str,
+                      service_spec: 'service_spec_lib.SkyServiceSpec',
+                      version: int, controller_host: str,
+                      controller_port: int) -> multiprocessing.Process:
     """Spawn (and start) the controller server subprocess for a service.
 
     Factored out of `_start` so the supervision loop can re-create the
@@ -484,8 +484,8 @@ def _respawn_controller_and_lb(
     load_balancer_log_file: str,
     dead_controller: Optional[multiprocessing.Process],
     old_lb: Optional[multiprocessing.Process]
-) -> Optional[Tuple[multiprocessing.Process,
-                    Optional[multiprocessing.Process], int]]:
+) -> Optional[Tuple[multiprocessing.Process, Optional[multiprocessing.Process],
+                    int]]:
     """Re-create the controller (on a FRESH port) and restart the LB after the
     controller child died while the _start parent is still alive.
 
@@ -538,7 +538,8 @@ def _respawn_controller_and_lb(
                                                version, controller_host,
                                                controller_port)
             _wait_for_controller_ready(
-                controller_host, controller_port,
+                controller_host,
+                controller_port,
                 timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS)
             if not new_controller.is_alive():
                 raise RuntimeError(
@@ -576,9 +577,9 @@ def _should_resume_teardown(is_recovery: bool,
     other reason left a non-teardown status (e.g. READY) and is recovered
     normally (brought back up).
     """
-    return (is_recovery and service is not None and service['status'] in (
-        serve_state.ServiceStatus.SHUTTING_DOWN,
-        serve_state.ServiceStatus.FAILED_CLEANUP))
+    return (is_recovery and service is not None and
+            service['status'] in (serve_state.ServiceStatus.SHUTTING_DOWN,
+                                  serve_state.ServiceStatus.FAILED_CLEANUP))
 
 
 def _run_cleanup_and_finalize(service_name: str,
@@ -756,10 +757,10 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
             # Nothing committed yet (e.g. an old record that predates
             # yaml-in-DB, recovered via the tmp-yaml fallback above). Fall back
             # to raw latest.
-            version = serve_state.get_latest_version(service_name)
-            if version is None:
-                raise ValueError(
-                    f'No version found for service {service_name}')
+            latest_version = serve_state.get_latest_version(service_name)
+            if latest_version is None:
+                raise ValueError(f'No version found for service {service_name}')
+            version = latest_version
         # Pre-claim controller_pid immediately so the next
         # ha_recovery_for_consolidation_mode iteration sees our _start
         # process as the live controller and does NOT fire a duplicate

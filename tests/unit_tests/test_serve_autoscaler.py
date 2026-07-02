@@ -188,7 +188,9 @@ class TestAutoscalerVersionInitialization(unittest.TestCase):
         self.assertEqual(autoscaler.latest_version_ever_ready,
                          constants.INITIAL_VERSION - 1)
 
-    def _route_spec(self, pool=False, use_ondemand_fallback=False,
+    def _route_spec(self,
+                    pool=False,
+                    use_ondemand_fallback=False,
                     target_qps_per_replica=2.0):
         return types.SimpleNamespace(
             pool=pool,

@@ -864,8 +864,8 @@ def get_latest_committed_version(service_name: str) -> Optional[int]:
     engine = _db_manager.get_engine()
     with orm.Session(engine) as session:
         result = session.execute(
-            sqlalchemy.select(
-                sqlalchemy.func.max(version_specs_table.c.version)).where(
+            sqlalchemy.select(sqlalchemy.func.max(
+                version_specs_table.c.version)).where(
                     sqlalchemy.and_(
                         version_specs_table.c.service_name == service_name,
                         version_specs_table.c.yaml_content.isnot(

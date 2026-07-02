@@ -51,8 +51,14 @@ def _spec(pool=False):
     return types.SimpleNamespace(pool=pool)
 
 
-def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
-           latest_version=None, latest_spec=None, killed=None):
+def _setup(monkeypatch,
+           *,
+           new_controller,
+           new_lb=None,
+           ready=True,
+           latest_version=None,
+           latest_spec=None,
+           killed=None):
     """Wire the respawn collaborators. new_controller/new_lb may be _FakeProc,
     None, or an Exception instance to raise from the spawn."""
     monkeypatch.setattr(service.filelock, 'FileLock', _DummyLock)
@@ -61,8 +67,7 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
                         lambda name, port: None)
     monkeypatch.setattr(serve_state, 'get_latest_committed_version',
                         lambda name: latest_version)
-    monkeypatch.setattr(serve_state, 'get_spec',
-                        lambda name, ver: latest_spec)
+    monkeypatch.setattr(serve_state, 'get_spec', lambda name, ver: latest_spec)
 
     spawn_ctrl_calls = []
 
@@ -85,6 +90,7 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
         monkeypatch.setattr(service, '_wait_for_controller_ready',
                             lambda *a, **k: None)
     else:
+
         def _not_ready(*a, **k):
             raise RuntimeError('not ready')
 
@@ -93,7 +99,8 @@ def _setup(monkeypatch, *, new_controller, new_lb=None, ready=True,
     if killed is None:
         killed = []
     monkeypatch.setattr(
-        subprocess_utils, 'kill_children_processes',
+        subprocess_utils,
+        'kill_children_processes',
         lambda parent_pids, force=False: killed.extend(parent_pids))
     return spawn_ctrl_calls, killed
 
@@ -124,7 +131,8 @@ def test_respawn_reloads_latest_version_and_spec(monkeypatch):
     spawn_calls, _ = _setup(monkeypatch,
                             new_controller=_FakeProc(alive=True, pid=333),
                             new_lb=_FakeProc(alive=True, pid=444),
-                            latest_version=7, latest_spec=latest_spec)
+                            latest_version=7,
+                            latest_spec=latest_spec)
 
     service._respawn_controller_and_lb('svc', _spec(), 1, '127.0.0.1', 30001,
                                        '/tmp/lb.log',
@@ -151,8 +159,8 @@ def test_respawn_db_error_retries_instead_of_stale_spec(monkeypatch):
 
     result = service._respawn_controller_and_lb('svc', _spec(), 1, '127.0.0.1',
                                                 30001, '/tmp/lb.log',
-                                                _FakeProc(alive=False, pid=111),
-                                                old_lb)
+                                                _FakeProc(alive=False,
+                                                          pid=111), old_lb)
 
     assert result is None
     assert spawn_calls == []
@@ -208,12 +216,12 @@ def test_respawn_lb_failure_returns_live_controller_with_no_lb(monkeypatch):
 
 
 def test_ensure_lb_noop_for_pool(monkeypatch):
-    monkeypatch.setattr(service, '_spawn_load_balancer',
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError('pool has no LB')))
+    monkeypatch.setattr(
+        service, '_spawn_load_balancer', lambda *a, **k:
+        (_ for _ in ()).throw(AssertionError('pool has no LB')))
     lb = _FakeProc(alive=True, pid=1)
-    assert service._ensure_load_balancer(lb, 'http://h:1', 30001, _spec(
-        pool=True), '/tmp/lb.log') is lb
+    assert service._ensure_load_balancer(lb, 'http://h:1', 30001,
+                                         _spec(pool=True), '/tmp/lb.log') is lb
 
 
 def test_ensure_lb_keeps_live_lb(monkeypatch):
@@ -231,11 +239,12 @@ def test_ensure_lb_restarts_dead_lb(monkeypatch):
     killed = []
     monkeypatch.setattr(service, '_spawn_load_balancer', lambda *a, **k: new_lb)
     monkeypatch.setattr(
-        subprocess_utils, 'kill_children_processes',
+        subprocess_utils,
+        'kill_children_processes',
         lambda parent_pids, force=False: killed.extend(parent_pids))
-    out = service._ensure_load_balancer(_FakeProc(alive=False, pid=1),
-                                        'http://h:1', 30001, _spec(),
-                                        '/tmp/lb.log')
+    out = service._ensure_load_balancer(_FakeProc(alive=False,
+                                                  pid=1), 'http://h:1', 30001,
+                                        _spec(), '/tmp/lb.log')
     assert out is new_lb
     assert 1 in killed
 
@@ -248,6 +257,7 @@ def test_ensure_lb_starts_missing_lb(monkeypatch):
 
 
 def test_ensure_lb_spawn_failure_is_contained(monkeypatch):
+
     def _boom(*a, **k):
         raise OSError('cannot start')
 
