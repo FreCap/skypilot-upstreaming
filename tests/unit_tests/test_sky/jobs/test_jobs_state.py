@@ -1256,8 +1256,8 @@ class TestGetJobsStatusCheckInfo:
     """Tests for the slim batched get_jobs_status_check_info helper.
 
     These pin the contract the status-refresh tick depends on and guard
-    against drift from get_managed_job_tasks (the LINT.IfChange-coupled
-    source of the same job_name/enum decode).
+    against drift from get_managed_job_tasks, which performs the same
+    job_name/enum decode and must stay in sync.
     """
 
     def test_empty_input_returns_empty(self, _mock_managed_jobs_db_conn):

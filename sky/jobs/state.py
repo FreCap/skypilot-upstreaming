@@ -1382,13 +1382,13 @@ def get_managed_job_tasks(job_id: int) -> List[Dict[str, Any]]:
     jobs = []
     for row in rows:
         job_dict = _get_jobs_dict(row._mapping)  # pylint: disable=protected-access
-        # LINT.IfChange(managed_job_row_decode)
+        # WARNING: Keep this decode (enum conversion + job_name fallback) in
+        # sync with get_jobs_status_check_info.
         job_dict['status'] = ManagedJobStatus(job_dict['status'])
         job_dict['schedule_state'] = ManagedJobScheduleState(
             job_dict['schedule_state'])
         if job_dict['job_name'] is None:
             job_dict['job_name'] = job_dict['task_name']
-        # LINT.ThenChange(:status_check_row_decode)
         job_dict['metadata'] = json.loads(job_dict['metadata'])
 
         # Add user YAML content for managed jobs.
@@ -1468,8 +1468,9 @@ def get_jobs_status_check_info(
             mapping = row._mapping  # pylint: disable=protected-access
             job_id = mapping['spot_job_id']
             info = result.get(job_id)
+            # WARNING: Keep this decode (enum conversion + job_name fallback)
+            # in sync with get_managed_job_tasks.
             if info is None:
-                # LINT.IfChange(status_check_row_decode)
                 info = {
                     'schedule_state':
                         ManagedJobScheduleState(mapping['schedule_state']),
@@ -1490,7 +1491,6 @@ def get_jobs_status_check_info(
                 'status': ManagedJobStatus(mapping['status']),
                 'job_name': job_name,
             })
-            # LINT.ThenChange(:managed_job_row_decode)
     return result
 
 
