@@ -147,9 +147,7 @@ class TestTtlCache:
             except Exception as e:  # pylint: disable=broad-except
                 errors.append(e)
 
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(8)
-        ]
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
         for thread in threads:
             thread.start()
         for thread in threads:
