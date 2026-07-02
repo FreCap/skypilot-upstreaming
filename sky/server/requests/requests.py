@@ -575,6 +575,22 @@ def _init_db_within_lock():
         _DB = db_utils.SQLiteConn(db_path, create_table)
 
 
+def _close_db_within_lock():
+    """Close the calling thread's DB connection and drop the handle.
+
+    The next DB access re-initializes the handle, re-creating the database
+    file and its tables if needed. ``_DB`` is thread-local, so only the
+    calling thread's connection can be closed here: this is only safe during
+    single-threaded startup, before any other thread or event loop has
+    touched the request DB.
+    """
+    global _DB
+    if _DB is None:
+        return
+    _DB.conn.close()
+    _DB = None
+
+
 def _ensure_db_initialized():
     """Ensure the database is initialized.
 
@@ -618,8 +634,68 @@ def init_db_async(func):
     return wrapper
 
 
+def _log_orphaned_inflight_requests() -> None:
+    """Log any requests still in-flight when the API server last stopped.
+
+    ``reset_db_and_logs`` (run on every API-server startup) wipes the request DB
+    and its logs, and the executor child processes that ran those requests died
+    with the previous process. So a request that was still PENDING/WAITING/
+    RUNNING -- notably a long provisioning launch held by a long worker -- is
+    silently dropped: the caller (CLI, or a serve/jobs controller) awaiting it
+    sees the request vanish, while any half-provisioned cluster lives on in the
+    separate cluster-state DB and leaks until a later status refresh reaps it.
+
+    We cannot resume those requests here (their worker processes are gone), but
+    we can refuse to lose them silently: enumerate them at WARNING so the drop
+    is alertable and any leaked clusters are reconcilable. Best effort -- a scan
+    failure (e.g. an incompatible on-disk schema after an upgrade) must never
+    block startup.
+    """
+    try:
+        # Select only the plain columns needed for the log: the rows were
+        # written by the previous server version, and unpickling entrypoint
+        # or request_body can fail across an upgrade, which would silence
+        # the entire report.
+        orphaned = request_storage.get_request_backend().query_requests(
+            req_filter=RequestTaskFilter(
+                status=RequestStatus.active_statuses(),
+                fields=['request_id', 'name', 'status', COL_CLUSTER_NAME]))
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug('Could not scan for orphaned in-flight requests during '
+                     f'API server startup (continuing): {e}')
+        return
+    # Internal daemon requests sit in RUNNING for the whole life of the
+    # server and are recreated on every startup, so their rows are not
+    # dropped work; skip them like the other kill paths do.
+    orphaned = [
+        req for req in orphaned
+        if not daemons.is_daemon_request_id(req.request_id)
+    ]
+    if not orphaned:
+        return
+    logger.warning(
+        f'API server startup is clearing {len(orphaned)} request(s) that were '
+        'still in-flight when the server last stopped; their executor '
+        'processes are gone and the request rows are being wiped. Any clusters '
+        'they were provisioning may leak until the next status refresh:')
+    for req in orphaned:
+        cluster = f' cluster={req.cluster_name}' if req.cluster_name else ''
+        logger.warning(f'  dropped in-flight request {req.request_id} '
+                       f'name={req.name!r} status={req.status.value}{cluster}')
+
+
 def reset_db_and_logs():
     """Clear local state and re-initialize the request storage backend."""
+    # Surface any requests still in-flight when the server stopped BEFORE we
+    # wipe them, so the drop is alertable rather than silent (see helper).
+    _log_orphaned_inflight_requests()
+    # The scan may have initialized the module-level DB handle against the
+    # database file that is about to be removed. Drop the handle before the
+    # wipe so reset_on_startup() below re-creates the fresh database and its
+    # tables, instead of leaving this thread's connection bound to the
+    # unlinked file.
+    with _init_db_lock:
+        _close_db_within_lock()
     logger.debug('clearing local API server database')
     server_common.clear_local_api_server_database()
     logger.debug('clearing local API server logs directory at '
@@ -1599,12 +1675,18 @@ class SqliteRequestBackend(request_storage.RequestBackend):
     def get_shutdown_active_requests(self) -> List[Tuple[str, str]]:
         """Get (request_id, name) pairs to wait for during graceful shutdown."""
 
+        # Wait on every non-terminal request. Use active_statuses() rather than
+        # re-hardcoding the list: this query was the lone outlier that drifted
+        # out of sync and silently dropped the WAITING status. A
+        # request parked in WAITING -- on a retry backoff or an external
+        # continue-condition, with its resume timer living only in an in-memory
+        # monitor thread -- would otherwise be neither waited for nor handed to
+        # interrupt_request_for_retry, so should_retry would never be set; its
+        # timer would die with the process and reset_db_and_logs would wipe the
+        # row on the next boot, silently dropping it on a clean restart.
         tasks = self.query_requests(
             RequestTaskFilter(
-                status=[
-                    RequestStatus.PENDING,
-                    RequestStatus.RUNNING,
-                ],
+                status=RequestStatus.active_statuses(),
                 fields=['request_id', 'name'],
             ))
         return [(t.request_id, t.name) for t in tasks]
