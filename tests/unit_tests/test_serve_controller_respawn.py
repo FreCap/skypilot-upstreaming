@@ -58,7 +58,6 @@ def _setup(monkeypatch,
            *,
            new_controller,
            new_lb=None,
-           ready=True,
            latest_version=None,
            latest_spec=None,
            killed=None,
@@ -91,15 +90,8 @@ def _setup(monkeypatch,
 
     monkeypatch.setattr(service, '_spawn_load_balancer', _spawn_lb)
 
-    if ready:
-        monkeypatch.setattr(service, '_wait_for_controller_ready',
-                            lambda *a, **k: None)
-    else:
-
-        def _not_ready(*a, **k):
-            raise RuntimeError('not ready')
-
-        monkeypatch.setattr(service, '_wait_for_controller_ready', _not_ready)
+    monkeypatch.setattr(service, '_wait_for_controller_ready',
+                        lambda *a, **k: None)
 
     if killed is None:
         killed = []
