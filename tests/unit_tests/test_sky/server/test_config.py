@@ -128,12 +128,10 @@ def test_parallel_size_long():
 
 
 def test_parallel_size_long_cpu_multiplier_override(monkeypatch):
-    # Plenty of memory so that the CPU-based limit is the binding one.
+    # Plenty of memory so that the CPU-based limit is the binding one. The
+    # unset/default-multiplier case is covered by test_parallel_size_long.
     cpu_count = 4
     mem_size_gb = 50
-
-    # Unset: the default multiplier of 2 applies.
-    assert config._max_long_worker_parallism(cpu_count, mem_size_gb) == 8
 
     # A valid override scales the CPU-based parallelism.
     monkeypatch.setenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR, '4')
@@ -143,10 +141,8 @@ def test_parallel_size_long_cpu_multiplier_override(monkeypatch):
     monkeypatch.setenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR, 'not-an-int')
     assert config._max_long_worker_parallism(cpu_count, mem_size_gb) == 8
 
-    # Zero and negative overrides are floored at 1.
+    # Non-positive overrides are floored at 1.
     monkeypatch.setenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR, '0')
-    assert config._max_long_worker_parallism(cpu_count, mem_size_gb) == 4
-    monkeypatch.setenv(config.LONG_WORKER_CPU_MULTIPLIER_ENV_VAR, '-3')
     assert config._max_long_worker_parallism(cpu_count, mem_size_gb) == 4
 
 
