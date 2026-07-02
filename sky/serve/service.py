@@ -730,21 +730,28 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         # wedge the controller on boot.
         if recovery_version is not None:
             version = recovery_version
-            # Drop orphan placeholder versions (NULL yaml) left ABOVE the
-            # committed version by an interrupted update, so a later
-            # `sky serve update` gets a clean MAX(version)+1 and recovery is
-            # never wedged by them again. Scoped to > version so it can never
-            # delete the version we are about to boot, nor legitimate older
-            # records that predate yaml-in-DB. Safe here: the API server just
-            # restarted, so no update is in flight.
-            serve_state.delete_uncommitted_versions(service_name,
-                                                    newer_than=version)
+            # An interrupted `sky serve update` may have left NULL-yaml
+            # placeholder versions above the committed version (add_version
+            # inserts the row before the yaml is persisted). Leave them in
+            # place: recovery can also run while the API server stays up and
+            # keeps serving updates (e.g. only the controller process died),
+            # so deleting them could race an in-flight update and re-open its
+            # version number for reuse by a concurrent update. They are
+            # otherwise inert -- recovery and respawn boot from the latest
+            # committed version, and a later update allocates MAX(version)+1
+            # above them. The interrupted update itself is unrecoverable (its
+            # yaml was never persisted), so warn instead of silently reverting
+            # it.
+            raw_latest = serve_state.get_latest_version(service_name)
+            if raw_latest is not None and raw_latest > version:
+                logger.warning(
+                    f'Service {service_name} has uncommitted version(s) up to '
+                    f'{raw_latest} left by an interrupted update; recovering '
+                    f'at the latest committed version {version}.')
         else:
             # Nothing committed yet (e.g. an old record that predates
             # yaml-in-DB, recovered via the tmp-yaml fallback above). Fall back
-            # to raw latest and do NOT sweep -- the version we boot has no
-            # committed yaml of its own, so deleting NULL-yaml rows could remove
-            # it.
+            # to raw latest.
             version = serve_state.get_latest_version(service_name)
             if version is None:
                 raise ValueError(

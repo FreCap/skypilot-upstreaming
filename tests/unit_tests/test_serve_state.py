@@ -330,12 +330,11 @@ class TestRemoveServiceCompletely:
 
 
 class TestRecoveryVersionSelection:
-    """`get_latest_committed_version` / `delete_uncommitted_versions` are the
-    core of the F4 fix: an interrupted `sky serve update` leaves a NULL-yaml
-    placeholder version (written by `add_version`) as MAX(version). Recovery
-    must resume the latest version whose yaml was actually committed, otherwise
-    the controller crash-loops asserting on the NULL yaml. These tests pin that
-    the placeholder is skipped and can be swept."""
+    """An interrupted `sky serve update` leaves a NULL-yaml placeholder
+    version (written by `add_version`) as MAX(version). Recovery must resume
+    the latest version whose yaml was actually committed, otherwise the
+    controller crash-loops asserting on the NULL yaml. These tests pin that
+    `get_latest_committed_version` skips the placeholder."""
 
     def test_committed_version_skips_placeholder(self, _mock_serve_db):
         # v1 committed (yaml persisted), then an interrupted update creates a
@@ -360,41 +359,3 @@ class TestRecoveryVersionSelection:
     def test_committed_version_none_when_only_placeholder(self, _mock_serve_db):
         serve_state.add_version('svc')  # placeholder v1, no committed yaml
         assert serve_state.get_latest_committed_version('svc') is None
-
-    def test_delete_uncommitted_removes_placeholder_keeps_committed(
-            self, _mock_serve_db):
-        serve_state.add_or_update_version('svc', 1, 'spec-1', 'yaml: v1')
-        serve_state.add_version('svc')  # placeholder v2
-        serve_state.delete_uncommitted_versions('svc', newer_than=1)
-        # Placeholder gone -> MAX is back to the committed version.
-        assert serve_state.get_latest_version('svc') == 1
-        assert serve_state.get_yaml_content('svc', 1) == 'yaml: v1'
-
-    def test_delete_uncommitted_preserves_old_null_yaml_rows(self,
-                                                             _mock_serve_db):
-        # A legitimate older record that predates yaml-in-DB (NULL yaml) sits
-        # BELOW the recovered committed version; the placeholder sits ABOVE it.
-        # Only the placeholder must be swept.
-        serve_state.add_version('svc')  # v1: old NULL-yaml record
-        serve_state.add_or_update_version('svc', 2, 'spec-2', 'yaml: v2')
-        serve_state.add_version('svc')  # v3: interrupted-update placeholder
-        serve_state.delete_uncommitted_versions('svc', newer_than=2)
-        # v3 (placeholder above committed) removed; v1 (old, below) preserved.
-        assert serve_state.get_yaml_content('svc', 2) == 'yaml: v2'
-        assert serve_state.get_latest_version('svc') == 2
-        with orm.Session(_mock_serve_db) as session:
-            remaining = session.execute(
-                sqlalchemy.select(serve_state.version_specs_table.c.version).
-                where(serve_state.version_specs_table.c.service_name == 'svc')
-            ).fetchall()
-        assert {r[0] for r in remaining} == {1, 2}
-
-    def test_delete_uncommitted_scoped_to_service(self, _mock_serve_db):
-        serve_state.add_or_update_version('keep', 1, 'spec-1', 'yaml: v1')
-        serve_state.add_version('keep')  # placeholder v2 for 'keep'
-        serve_state.add_or_update_version('drop', 1, 'spec-1', 'yaml: v1')
-        serve_state.add_version('drop')  # placeholder v2 for 'drop'
-        serve_state.delete_uncommitted_versions('drop', newer_than=1)
-        # 'drop' placeholder gone, 'keep' placeholder untouched.
-        assert serve_state.get_latest_version('drop') == 1
-        assert serve_state.get_latest_version('keep') == 2
