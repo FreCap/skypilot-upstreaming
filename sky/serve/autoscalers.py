@@ -239,11 +239,10 @@ class Autoscaler:
                                           target_num_replicas))
 
     @classmethod
-    def from_spec(
-            cls,
-            service_name: str,
-            spec: 'service_spec.SkyServiceSpec',
-            version: int = constants.INITIAL_VERSION) -> 'Autoscaler':
+    def from_spec(cls,
+                  service_name: str,
+                  spec: 'service_spec.SkyServiceSpec',
+                  version: int = constants.INITIAL_VERSION) -> 'Autoscaler':
         # TODO(MaoZiming): use NAME to get the class.
         if spec.pool:
             return QueueLengthAutoscaler(service_name, spec, version)
