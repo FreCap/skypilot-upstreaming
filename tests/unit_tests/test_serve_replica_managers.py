@@ -61,17 +61,16 @@ class TestSkyPilotReplicaManagerInitOrdering:
                  '_recover_replica_operations',
                  _record('recover')), \
              mock.patch(
-                 'sky.serve.replica_managers.threading.Thread') as mock_thread:
-            # Each Thread(target=...).start() records the target's name
-            # via our side_effect on .start().
-            def thread_factory(*_args, **kwargs):
-                target = kwargs.get('target')
-                t = mock.Mock()
+                 'sky.serve.replica_managers.thread_utils'
+                 '.start_supervised_thread') as mock_supervised:
+            # start_supervised_thread starts the supervisor thread
+            # immediately, so its call time IS the thread start time.
+            def _start_supervised(target, *_args, **_kwargs):
                 target_name = getattr(target, '__name__', repr(target))
-                t.start.side_effect = _record(f'thread_start:{target_name}')
-                return t
+                call_order.append(f'thread_start:{target_name}')
+                return mock.Mock()
 
-            mock_thread.side_effect = thread_factory
+            mock_supervised.side_effect = _start_supervised
 
             spec = mock.MagicMock()
             replica_managers.SkyPilotReplicaManager(service_name='svc',
@@ -97,9 +96,9 @@ class TestSkyPilotReplicaManagerInitOrdering:
                     f'TestSkyPilotReplicaManagerInitOrdering.')
 
     def test_all_three_daemon_threads_are_started(self):
-        """Sanity: regardless of ordering, the three daemon threads
+        """Sanity: regardless of ordering, the three control-loop threads
         (_thread_pool_refresher / _job_status_fetcher / _replica_prober)
-        still all start. The fix is purely a reorder, not a removal."""
+        still all start (supervised)."""
         started_targets = []
 
         with mock.patch.object(
@@ -118,15 +117,14 @@ class TestSkyPilotReplicaManagerInitOrdering:
                  replica_managers.SkyPilotReplicaManager,
                  '_recover_replica_operations'), \
              mock.patch(
-                 'sky.serve.replica_managers.threading.Thread') as mock_thread:
+                 'sky.serve.replica_managers.thread_utils'
+                 '.start_supervised_thread') as mock_supervised:
 
-            def thread_factory(*_args, **kwargs):
-                target = kwargs.get('target')
+            def _start_supervised(target, *_args, **_kwargs):
                 started_targets.append(getattr(target, '__name__', None))
-                t = mock.Mock()
-                return t
+                return mock.Mock()
 
-            mock_thread.side_effect = thread_factory
+            mock_supervised.side_effect = _start_supervised
 
             spec = mock.MagicMock()
             replica_managers.SkyPilotReplicaManager(service_name='svc',

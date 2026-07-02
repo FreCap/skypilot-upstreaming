@@ -817,9 +817,16 @@ class SkyPilotReplicaManager(ReplicaManager):
         # `_recover_replica_operations` has already released it.
         self._recover_replica_operations()
 
-        threading.Thread(target=self._thread_pool_refresher).start()
-        threading.Thread(target=self._job_status_fetcher).start()
-        threading.Thread(target=self._replica_prober).start()
+        # Supervised so a BaseException escaping any of these loops (or the
+        # loop returning) does not silently freeze replica reconciliation /
+        # job-status reaping / readiness probing while the controller keeps
+        # serving HTTP -- they are restarted instead.
+        thread_utils.start_supervised_thread(self._thread_pool_refresher,
+                                             'replica-thread-pool-refresher')
+        thread_utils.start_supervised_thread(self._job_status_fetcher,
+                                             'replica-job-status-fetcher')
+        thread_utils.start_supervised_thread(self._replica_prober,
+                                             'replica-prober')
 
     @with_lock
     def _recover_replica_operations(self):

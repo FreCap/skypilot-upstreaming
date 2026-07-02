@@ -11,7 +11,7 @@ import socket
 import sys
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 import filelock
 
@@ -35,6 +35,9 @@ from sky.utils import controller_utils
 from sky.utils import subprocess_utils
 from sky.utils import thread_utils
 from sky.utils import ux_utils
+
+if TYPE_CHECKING:
+    from sky.serve import service_spec as service_spec_lib
 
 # Use the explicit logger name so that the logger is under the
 # `sky.serve.service` namespace when executed directly, so as
@@ -60,6 +63,14 @@ def _handle_signal(service_name: str) -> None:
                     logger.warning(
                         f'Unknown signal received: {user_signal}. Ignoring.')
                     user_signal = None
+            if user_signal is serve_utils.UserSignal.TERMINATE:
+                # Persist the teardown intent BEFORE consuming the signal so a
+                # crash in this window cannot resurrect the service: HA recovery
+                # then sees either SHUTTING_DOWN (and resumes teardown) or the
+                # still-present signal (and re-fires terminate) -- never a
+                # downed service that comes back up serving.
+                serve_state.set_service_status_and_active_versions(
+                    service_name, serve_state.ServiceStatus.SHUTTING_DOWN)
             # Remove the signal file, after reading it.
             signal_file.unlink()
     if user_signal is None:
@@ -142,9 +153,9 @@ def _cleanup(service_name: str, pool: bool) -> bool:
     """Clean up all service related resources, i.e. replicas and storage."""
     # Log who we are and what DB state we're cleaning up, so post-mortems
     # can correlate this with concurrent ha_recovery activity. _cleanup is
-    # destructive (it deletes the HA recovery script on the very next line
-    # and may delete the entire service row at the end), so an audit trail
-    # is worth a few WARN lines.
+    # destructive (it tears down replicas and, at the very end, deletes the
+    # HA recovery script and may delete the entire service row), so an audit
+    # trail is worth a few WARN lines.
     own_pid = os.getpid()
     try:
         svc_dbg = serve_state.get_service_from_name(service_name)
@@ -160,10 +171,14 @@ def _cleanup(service_name: str, pool: bool) -> bool:
         logger.warning(
             f'_cleanup entered for service {service_name} '
             f'(own_pid={own_pid}, db row not found — already removed?)')
-    # Cleanup the HA recovery script first as it is possible that some error
-    # was raised when we construct the task object (e.g.,
-    # sky.exceptions.ResourcesUnavailableError).
-    serve_state.remove_ha_recovery_script(service_name)
+    # NOTE: the HA recovery script is removed at the END of _cleanup (after
+    # replica teardown), NOT here. Removing it up-front opened a window where a
+    # controller-pod kill mid-teardown (HA pod move / node drain) left a durable
+    # service row with NO recovery script — ha_recovery_for_consolidation_mode
+    # then logs 'recovery script does not exist. Skipping recovery' forever and
+    # strands the service with replicas still consuming resources. Keeping the
+    # script until all destructive teardown finishes lets recovery re-run
+    # _cleanup if we die partway. See the removal at the end of this function.
     failed = False
     replica_infos = serve_state.get_replica_infos(service_name)
     info2thr: Dict[replica_managers.ReplicaInfo,
@@ -255,6 +270,15 @@ def _cleanup(service_name: str, pool: bool) -> bool:
     if not all(map(cleanup_version_storage, versions)):
         failed = True
 
+    # All destructive teardown above is done; only now is it safe to drop the
+    # HA recovery script. If we had been killed partway through teardown the
+    # script would have survived, letting ha_recovery_for_consolidation_mode
+    # respawn the controller and re-run _cleanup instead of stranding the
+    # service. On the success path the caller's remove_service_completely also
+    # deletes it (idempotent); on the FAILED_CLEANUP path removing it here
+    # avoids a recovery loop on a cleanup that already ran to completion.
+    serve_state.remove_ha_recovery_script(service_name)
+
     # NOTE: do not delete version_specs here. The success path in `_start`
     # deletes them along with `remove_service`. Deleting them on failure
     # makes the `services` row invisible to `get_service_from_name` (it
@@ -279,17 +303,31 @@ def _cleanup_task_run_script(job_id: int) -> None:
             logger.warning(f'Task run script {this_task_run_script} not found')
 
 
-def _wait_for_controller_ready(host: str, port: int, timeout: int = 30) -> None:
+def _wait_for_controller_ready(
+        host: str,
+        port: int,
+        timeout: int = 30,
+        process: Optional[multiprocessing.Process] = None) -> None:
     """Block until the controller HTTP server is accepting connections.
 
     We must not flip DB `controller_pid`/`controller_ip` until the new
     subprocess is actually listening, otherwise clients routed by DB hit
     the new pod's IP before its uvicorn binds and get ECONNREFUSED.
+
+    If `process` is given, fail as soon as it is no longer alive instead of
+    burning the full timeout: this wait runs while holding the host-global
+    port-selection lock, so a controller child that dies at boot would
+    otherwise hold that lock for the entire timeout on every (5s-cadence)
+    respawn retry, starving other services' boot/recovery on the same host.
     """
     # When binding 0.0.0.0, probe via loopback.
     probe_host = '127.0.0.1' if host == '0.0.0.0' else host
     start = time.time()
     while time.time() - start < timeout:
+        if process is not None and not process.is_alive():
+            raise RuntimeError(
+                f'Controller process exited (exitcode={process.exitcode}) '
+                f'before becoming ready on {probe_host}:{port}')
         try:
             with socket.create_connection((probe_host, port), timeout=0.5):
                 return
@@ -380,6 +418,238 @@ def _bail_on_boot_failure(service_name: str,
     os._exit(1)  # pylint: disable=protected-access
 
 
+def _spawn_controller(service_name: str,
+                      service_spec: 'service_spec_lib.SkyServiceSpec',
+                      version: int, controller_host: str,
+                      controller_port: int) -> multiprocessing.Process:
+    """Spawn (and start) the controller server subprocess for a service.
+
+    Factored out of `_start` so the supervision loop can re-create the
+    controller (on a fresh port) if it dies. See `_respawn_controller_and_lb`.
+    """
+    process = multiprocessing.Process(target=controller.run_controller,
+                                      args=(service_name, service_spec, version,
+                                            controller_host, controller_port))
+    process.start()
+    return process
+
+
+def _spawn_load_balancer(
+        controller_addr: str, load_balancer_port: int,
+        service_spec: 'service_spec_lib.SkyServiceSpec',
+        load_balancer_log_file: str) -> multiprocessing.Process:
+    """Spawn (and start) the load balancer subprocess.
+
+    It serves the public `load_balancer_port` and syncs with the controller at
+    `controller_addr`. Factored out so the controller respawn can restart the
+    LB pointing at the new controller addr, and a dead LB can be restarted.
+    """
+    process = multiprocessing.Process(
+        target=ux_utils.RedirectOutputForProcess(
+            load_balancer.run_load_balancer, load_balancer_log_file).run,
+        args=(controller_addr, load_balancer_port,
+              service_spec.load_balancing_policy, service_spec.tls_credential,
+              service_spec.target_qps_per_replica,
+              service_spec.lb_stream_timeout_seconds))
+    process.start()
+    return process
+
+
+def _kill_process(process: Optional[multiprocessing.Process]) -> None:
+    """Best-effort SIGKILL of a subprocess and its children."""
+    if process is None:
+        return
+    try:
+        subprocess_utils.kill_children_processes(parent_pids=[process.pid],
+                                                 force=True)
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+
+def _ensure_load_balancer(
+        lb_process: Optional[multiprocessing.Process], controller_addr: str,
+        load_balancer_port: int,
+        service_spec: 'service_spec_lib.SkyServiceSpec',
+        load_balancer_log_file: str) -> Optional[multiprocessing.Process]:
+    """Ensure the load balancer is running for a non-pool service.
+
+    Restarts it -- on the same public `load_balancer_port`, pointing at
+    `controller_addr` -- if it is missing or dead. Pool services have no LB.
+    Contained: never raises into _start's destructive cleanup.
+    """
+    if service_spec.pool:
+        return lb_process
+    if lb_process is not None and lb_process.is_alive():
+        return lb_process
+    _kill_process(lb_process)
+    try:
+        return _spawn_load_balancer(controller_addr, load_balancer_port,
+                                    service_spec, load_balancer_log_file)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error(f'Failed to (re)start the load balancer: '
+                     f'{common_utils.format_exception(e)}; will retry.')
+        return None
+
+
+def _respawn_controller_and_lb(
+    service_name: str, service_spec: 'service_spec_lib.SkyServiceSpec',
+    version: int, controller_host: str, load_balancer_port: int,
+    load_balancer_log_file: str,
+    dead_controller: Optional[multiprocessing.Process],
+    old_lb: Optional[multiprocessing.Process]
+) -> Optional[Tuple[multiprocessing.Process, Optional[multiprocessing.Process],
+                    int]]:
+    """Re-create the controller (on a FRESH port) and restart the LB after the
+    controller child died while the _start parent is still alive.
+
+    HA recovery only re-creates a controller when the parent `controller_pid`
+    row disappears / a pod moves; it does NOT cover the controller child dying
+    while the parent stays alive, and in VM mode nothing does -- autoscaling,
+    probing and reconciliation would otherwise stop permanently.
+
+    A fresh controller port, chosen free under the port-selection lock, avoids
+    the cross-wiring a same-port reuse risks when services share a controller
+    pod: another service cannot already hold a port we just found free and hold
+    the lock for. The LB is restarted pointing at the new controller addr but on
+    the SAME public `load_balancer_port`, so the service endpoint is stable. The
+    DB controller_port write is guarded by row ownership (compare-and-swap on
+    `controller_pid`): HA recovery on another pod may have taken the row over
+    since our last (30s-cadence) orphan check, and an unconditional write would
+    cross-wire the new owner's atomically-flipped pid/ip/port with our stale
+    port. controller_pid/ip (the live parent) and the public load_balancer_port
+    are unchanged.
+
+    Returns (controller_process, lb_process, controller_port) on success, or
+    None on failure (retry next tick). Never raises into _start's destructive
+    cleanup. The OLD load balancer is left running until the new controller is
+    confirmed, so the data plane is not dropped during retries.
+    """
+    # Reload the latest version + spec so a respawn after /update_service uses
+    # the current config (fall back to captured values on a DB error).
+    try:
+        latest = serve_state.get_latest_version(service_name)
+        if latest is not None:
+            spec = serve_state.get_spec(service_name, latest)
+            if spec is not None:
+                version, service_spec = latest, spec
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(f'Could not reload latest version/spec for '
+                       f'{service_name} on respawn ({e}); using captured '
+                       f'version {version}.')
+
+    new_controller = None
+    try:
+        with filelock.FileLock(
+                os.path.expanduser(constants.PORT_SELECTION_FILE_LOCK_PATH)):
+            controller_port = common_utils.find_free_port(
+                constants.CONTROLLER_PORT_START)
+            new_controller = _spawn_controller(service_name, service_spec,
+                                               version, controller_host,
+                                               controller_port)
+            # `process=` fails this wait fast if the replacement dies at boot,
+            # instead of holding the port-selection lock for the full timeout
+            # on every retry of a crash-looping controller.
+            _wait_for_controller_ready(
+                controller_host,
+                controller_port,
+                timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS,
+                process=new_controller)
+            if not new_controller.is_alive():
+                raise RuntimeError(
+                    'replacement controller exited during startup')
+            if not serve_state.set_service_controller_port_if_owner(
+                    service_name, os.getpid(), controller_port):
+                # Another instance (HA recovery on a different pod) took over
+                # the row while we were bringing up the replacement. Discard it
+                # and keep the old LB; the orphan check in _start's loop will
+                # exit this parent shortly.
+                logger.warning(
+                    f'Lost ownership of service {service_name} during the '
+                    'controller respawn; discarding the replacement '
+                    'controller.')
+                _kill_process(new_controller)
+                return None
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error(f'Failed to bring up a replacement controller for '
+                     f'{service_name}: {common_utils.format_exception(e)}; '
+                     f'will retry on the next tick.')
+        _kill_process(new_controller)
+        return None  # old LB left running -> data plane preserved during retry
+
+    # Controller is up on the new port. Reap the dead controller's leftovers,
+    # then restart the LB (it targeted the dead controller's addr) on the same
+    # public port. The brief LB gap is unavoidable for an addr change.
+    _kill_process(dead_controller)
+    _kill_process(old_lb)
+    controller_addr = f'http://{controller_host}:{controller_port}'
+    new_lb = _ensure_load_balancer(None, controller_addr, load_balancer_port,
+                                   service_spec, load_balancer_log_file)
+    logger.info(f'Controller for {service_name} respawned on fresh port '
+                f'{controller_port}; load balancer restarted.')
+    return new_controller, new_lb, controller_port
+
+
+def _should_resume_teardown(is_recovery: bool,
+                            service: Optional[Dict[str, Any]]) -> bool:
+    """Whether a recovery run should resume teardown instead of serving.
+
+    A controller that died mid-teardown left the service in a teardown status
+    (SHUTTING_DOWN from a user `down`, or FAILED_CLEANUP from a prior failed
+    attempt). Bringing it back up would resurrect a service the user tore down,
+    so recovery must instead finish the cleanup. A controller that died for any
+    other reason left a non-teardown status (e.g. READY) and is recovered
+    normally (brought back up).
+    """
+    return (is_recovery and service is not None and
+            service['status'] in (serve_state.ServiceStatus.SHUTTING_DOWN,
+                                  serve_state.ServiceStatus.FAILED_CLEANUP))
+
+
+def _run_cleanup_and_finalize(service_name: str,
+                              service_spec: 'service_spec_lib.SkyServiceSpec',
+                              service_dir: str, job_id: int) -> None:
+    """Run ``_cleanup`` and finalize the service's DB / dir state.
+
+    Shared by ``_start``'s teardown ``finally`` and the recovery-resume path (a
+    controller that died mid-teardown). On failure the service is left
+    FAILED_CLEANUP so an operator can ``--purge``; on success the service row
+    and working dir are removed.
+    """
+    try:
+        failed = _cleanup(service_name, service_spec.pool)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error(f'Failed to clean up service {service_name}: {e}')
+        with ux_utils.enable_traceback():
+            logger.error(f'  Traceback: {traceback.format_exc()}')
+        failed = True
+        # _cleanup raised before its own end-of-function script removal, so the
+        # HA recovery script is still present. Remove it here: FAILED_CLEANUP is
+        # a teardown status that _should_resume_teardown resumes, so leaving the
+        # script would make HA recovery re-run cleanup and hit the same error
+        # forever. (A PROCESS death before this handler never runs this line, so
+        # the script is preserved for that case -- which is what we want.)
+        try:
+            serve_state.remove_ha_recovery_script(service_name)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    if failed:
+        serve_state.set_service_status_and_active_versions(
+            service_name, serve_state.ServiceStatus.FAILED_CLEANUP)
+        logger.error(f'Service {service_name} failed to clean up.')
+    else:
+        serve_state.remove_service_completely(service_name)
+        try:
+            shutil.rmtree(service_dir)
+        except FileNotFoundError:
+            # The service_dir may already be gone (e.g. the controller's own
+            # success path raced with a purge).
+            pass
+        logger.info(f'Service {service_name} terminated successfully.')
+
+    _cleanup_task_run_script(job_id)
+
+
 def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
     """Starts the service.
     This including the controller and load balancer.
@@ -415,6 +685,19 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
 
     service_dir = os.path.expanduser(
         serve_utils.generate_remote_service_dir_name(service_name))
+
+    # If the previous controller died mid-teardown, its HA recovery script was
+    # preserved (see _cleanup, which now removes the script only AFTER
+    # teardown). Bringing the controller + LB back up here would resurrect a
+    # service the user tore down -- so resume the unfinished cleanup instead.
+    if _should_resume_teardown(is_recovery, service):
+        assert service is not None
+        logger.info(f'Recovering service {service_name} in status '
+                    f'{service["status"].value}: resuming teardown instead of '
+                    'serving.')
+        _run_cleanup_and_finalize(service_name, service_spec, service_dir,
+                                  job_id)
+        return
 
     # Pod IP for HA leader-aware routing.
     pod_ip: Optional[str] = os.environ.get('POD_IP')
@@ -515,11 +798,9 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                 return '127.0.0.1'
 
             controller_host = _get_controller_host()
-            controller_process = multiprocessing.Process(
-                target=controller.run_controller,
-                args=(service_name, service_spec, version, controller_host,
-                      controller_port))
-            controller_process.start()
+            controller_process = _spawn_controller(service_name, service_spec,
+                                                   version, controller_host,
+                                                   controller_port)
             logger.debug(f'_start() spawned controller_process pid='
                          f'{controller_process.pid} host={controller_host} '
                          f'port={controller_port}')
@@ -539,7 +820,8 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                 _wait_for_controller_ready(
                     controller_host,
                     controller_port,
-                    timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS)
+                    timeout=constants.SERVICE_REGISTER_TIMEOUT_SECONDS,
+                    process=controller_process)
             except RuntimeError as boot_err:
                 # Bail without falling through to the outer try/finally,
                 # which would call _cleanup → remove_ha_recovery_script
@@ -585,16 +867,9 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
             # NOTE(tian): We don't need the load balancer for pool.
             # Skip the load balancer process for pool.
             if not service_spec.pool:
-                load_balancer_process = multiprocessing.Process(
-                    target=ux_utils.RedirectOutputForProcess(
-                        load_balancer.run_load_balancer,
-                        load_balancer_log_file).run,
-                    args=(controller_addr, load_balancer_port,
-                          service_spec.load_balancing_policy,
-                          service_spec.tls_credential,
-                          service_spec.target_qps_per_replica,
-                          service_spec.lb_stream_timeout_seconds))
-                load_balancer_process.start()
+                load_balancer_process = _spawn_load_balancer(
+                    controller_addr, load_balancer_port, service_spec,
+                    load_balancer_log_file)
 
             if not is_recovery:
                 serve_state.set_service_load_balancer_port(
@@ -605,6 +880,11 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         # matters in HA deployments and is checked once per
         # interval to avoid DB load.
         orphan_check_interval_seconds = 30
+        # How often to check that the controller child is still alive and
+        # respawn it if it died (a cheap local is_alive() poll). Capped at this
+        # cadence so a controller that crash-loops on boot is respawned at most
+        # once per interval.
+        controller_respawn_check_interval_seconds = 5
         own_pid = os.getpid()
         loop_count = 0
         while True:
@@ -637,6 +917,30 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                         f'{own_pid}; another instance has taken over. '
                         'Exiting as orphan without running cleanup.')
                     _orphan_exit(controller_process, load_balancer_process)
+            # Keep the serve subprocesses alive while we (the parent) own the
+            # DB row. HA recovery does not cover a child dying while the parent
+            # stays alive, and in VM mode nothing does -- the service would
+            # otherwise stop autoscaling / probing / reconciling permanently.
+            # A dead controller is re-created on a FRESH port (avoiding cross-
+            # wiring) and the LB restarted to point at it; otherwise the LB is
+            # ensured up (it may have died on its own, or a prior respawn's LB
+            # restart may have failed). Runs after the orphan-exit above.
+            if loop_count % controller_respawn_check_interval_seconds == 0:
+                if (controller_process is not None and
+                        not controller_process.is_alive()):
+                    result = _respawn_controller_and_lb(
+                        service_name, service_spec, version, controller_host,
+                        load_balancer_port, load_balancer_log_file,
+                        controller_process, load_balancer_process)
+                    if result is not None:
+                        (controller_process, load_balancer_process,
+                         controller_port) = result
+                else:
+                    load_balancer_process = _ensure_load_balancer(
+                        load_balancer_process,
+                        f'http://{controller_host}:{controller_port}',
+                        load_balancer_port, service_spec,
+                        load_balancer_log_file)
             time.sleep(1)
     except exceptions.ServeUserTerminatedError:
         logger.debug(f'Caught ServeUserTerminatedError for '
@@ -684,34 +988,13 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
         for process in process_to_kill:
             process.join()
 
-        # Catch any exception here to avoid it kill the service monitoring
-        # process. In which case, the service will not only fail to clean
-        # up, but also cannot be terminated in the future as no process
-        # will handle the user signal anymore. Instead, we catch any error
-        # and set it to FAILED_CLEANUP instead.
-        try:
-            failed = _cleanup(service_name, service_spec.pool)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(f'Failed to clean up service {service_name}: {e}')
-            with ux_utils.enable_traceback():
-                logger.error(f'  Traceback: {traceback.format_exc()}')
-            failed = True
-
-        if failed:
-            serve_state.set_service_status_and_active_versions(
-                service_name, serve_state.ServiceStatus.FAILED_CLEANUP)
-            logger.error(f'Service {service_name} failed to clean up.')
-        else:
-            serve_state.remove_service_completely(service_name)
-            try:
-                shutil.rmtree(service_dir)
-            except FileNotFoundError:
-                # The service_dir may already be gone (e.g. the controller's own
-                # success path raced with a purge).
-                pass
-            logger.info(f'Service {service_name} terminated successfully.')
-
-        _cleanup_task_run_script(job_id)
+        # Run cleanup + finalize. _run_cleanup_and_finalize catches any error
+        # from _cleanup and sets FAILED_CLEANUP instead, so the service can
+        # still be terminated later (a crash here would otherwise leave no
+        # process to handle the user signal). Shared with the recovery-resume
+        # path above.
+        _run_cleanup_and_finalize(service_name, service_spec, service_dir,
+                                  job_id)
 
 
 if __name__ == '__main__':

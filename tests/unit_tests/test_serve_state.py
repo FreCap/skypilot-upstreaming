@@ -211,6 +211,29 @@ class TestUpdateServiceControllerPidIpAndPort:
         assert record['load_balancer_port'] == 30000  # untouched
 
 
+class TestSetServiceControllerPortIfOwner:
+    """Compare-and-swap port write for the in-place controller respawn: the
+    UPDATE must be filtered on controller_pid so a parent whose row was taken
+    over by HA recovery cannot clobber the new owner's port."""
+
+    def test_owner_updates_port(self, _mock_serve_db):
+        _add_minimal_service('svc')  # seeds controller_pid=12345
+        assert serve_state.set_service_controller_port_if_owner(
+            'svc', 12345, 20123) is True
+        assert _read_row(_mock_serve_db, 'svc')['controller_port'] == 20123
+
+    def test_non_owner_is_rejected(self, _mock_serve_db):
+        _add_minimal_service('svc')
+        serve_state.set_service_controller_port('svc', 20123)
+        assert serve_state.set_service_controller_port_if_owner(
+            'svc', 99999, 20999) is False
+        assert _read_row(_mock_serve_db, 'svc')['controller_port'] == 20123
+
+    def test_missing_service_returns_false(self, _mock_serve_db):
+        assert serve_state.set_service_controller_port_if_owner(
+            'never-existed', 12345, 20123) is False
+
+
 class TestSetServiceControllerIp:
     """Standalone IP setter is rarely called (the atomic version is preferred
     for recovery), but kept for symmetry with set_service_controller_port."""
