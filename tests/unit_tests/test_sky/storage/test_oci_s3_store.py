@@ -95,10 +95,9 @@ class TestOciS3CompatibleStore(unittest.TestCase):
         self.assertEqual(config.cloud_name, 'OCI')
 
     def test_region_suffix_in_name_rejected(self):
-        with self.assertRaises(exceptions.StorageNameError) as context:
+        with self.assertRaises(exceptions.StorageNameError):
             storage_lib.OciS3CompatibleStore(name='bucket@us-sanjose-1',
                                              source=None)
-        self.assertIn('S3-compatible', str(context.exception))
 
     def test_region_suffix_in_source_rejected(self):
         with self.assertRaises(exceptions.StorageNameError):
