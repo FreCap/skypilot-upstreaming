@@ -11,6 +11,7 @@ on the next boot -- silently dropping the request on a *clean* restart even
 though the whole ``should_retry`` machinery exists. This test pins that
 WAITING is treated like the other active statuses.
 """
+# pylint: disable=protected-access
 import unittest.mock as mock
 
 import pytest
