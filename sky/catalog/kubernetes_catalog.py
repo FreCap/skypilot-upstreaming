@@ -57,14 +57,17 @@ def is_image_tag_valid(tag: str, region: Optional[str]) -> bool:
 
 # Cache the non-realtime accelerator listing so the optimizer, which queries it
 # repeatedly within a single optimize() (once per resource per DAG node), does
-# not re-run the Kubernetes node scan (credential check + label-formatter
-# detection + full node list, several API calls) every time. This returns only
-# the static per-accelerator capacity/topology map (qtys_map) -- it never
-# carries live free-GPU counts -- so a short TTL is safe: request-scoped entries
-# are cleared at every api-server request boundary, and the TTL bounds staleness
-# in long-lived callers (e.g. the serve controller). NEVER cache
-# list_accelerators_realtime below -- it reports live availability that must
-# stay fresh.
+# not repeat the per-call work: the live check_credentials probe (one
+# Kubernetes API call per context) and the aggregation of node data into
+# per-accelerator counts. The underlying node scans (get_kubernetes_nodes,
+# accelerator-resource and GPU-label-formatter detection) are already
+# request-scoped lru caches, so this cache does not change how fresh the node
+# data is; like those inner caches, entries here are cleared at every
+# api-server request boundary. The ttl only bounds how long a cached result is
+# reused within a single long-running request. The cached value is the static
+# per-accelerator capacity/topology map (qtys_map) -- it never carries live
+# free-GPU counts. NEVER cache list_accelerators_realtime below -- it reports
+# live availability that must stay fresh.
 @annotations.ttl_cache(scope='request', timer=time.time, maxsize=10, ttl=30)
 def list_accelerators(
         gpus_only: bool,
