@@ -69,6 +69,21 @@ def is_image_tag_valid(tag: str, region: Optional[str]) -> bool:
 # free-GPU counts. NEVER cache list_accelerators_realtime below -- it reports
 # live availability that must stay fresh.
 @annotations.ttl_cache(scope='request', timer=time.time, maxsize=10, ttl=30)
+def _list_accelerators_cached(
+    gpus_only: bool,
+    name_filter: Optional[str],
+    region_filter: Optional[str],
+    quantity_filter: Optional[int],
+    case_sensitive: bool,
+) -> Dict[str, List[common.InstanceTypeInfo]]:
+    return _list_accelerators(gpus_only,
+                              name_filter,
+                              region_filter,
+                              quantity_filter,
+                              case_sensitive,
+                              realtime=False)[0]
+
+
 def list_accelerators(
         gpus_only: bool,
         name_filter: Optional[str],
@@ -77,14 +92,12 @@ def list_accelerators(
         case_sensitive: bool = True,
         all_regions: bool = False,
         require_price: bool = True) -> Dict[str, List[common.InstanceTypeInfo]]:
-    return _list_accelerators(gpus_only,
-                              name_filter,
-                              region_filter,
-                              quantity_filter,
-                              case_sensitive,
-                              all_regions,
-                              require_price,
-                              realtime=False)[0]
+    # all_regions and require_price do not affect the result (see
+    # _list_accelerators, which discards them); keep them out of the cache key
+    # so logically identical calls share a single cache entry.
+    del all_regions, require_price  # Unused.
+    return _list_accelerators_cached(gpus_only, name_filter, region_filter,
+                                     quantity_filter, case_sensitive)
 
 
 def list_accelerators_realtime(
