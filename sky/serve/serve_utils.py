@@ -1364,15 +1364,15 @@ def terminate_services(service_names: Optional[List[str]], purge: bool,
             # requested `pool`), and a `services` row with no `version_specs`
             # row -- an orphan stranded by an interrupted first-run
             # registration, invisible to the latest-version inner join.
-            # `add_service_with_initial_version` now writes both rows
-            # atomically, but a row stranded before that fix can still exist,
-            # and no normal path can recover or remove it (HA recovery and
-            # plain `down` both skip a None status). With --purge, clean such
-            # an orphan up directly -- but only when the raw row belongs to the
-            # requested mode, so a serve `down --purge` never removes a
-            # jobs-pool's row (or vice versa). This realizes the safeguard
-            # documented below, which the `service_status['status']` check
-            # further down can never reach.
+            # `add_service` now writes both rows atomically, but a row
+            # stranded before that fix can still exist, and no normal path
+            # can recover or remove it (HA recovery and plain `down` both
+            # skip a None status). With --purge, clean such an orphan up
+            # directly -- but only when the raw row belongs to the requested
+            # mode, so a serve `down --purge` never removes a jobs-pool's row
+            # (or vice versa). This realizes the safeguard documented below,
+            # which the `service_status['status']` check further down can
+            # never reach.
             if purge:
                 raw_pool = serve_state.get_service_pool_from_db(service_name)
                 if raw_pool is not None and raw_pool == pool:

@@ -436,7 +436,7 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
             # recovery and teardown, and which blocks re-`up` of the name.
             os.makedirs(service_dir, exist_ok=True)
             version = constants.INITIAL_VERSION
-            success = serve_state.add_service_with_initial_version(
+            success = serve_state.add_service(
                 service_name,
                 controller_job_id=job_id,
                 policy=service_spec.autoscaling_policy_str(),
@@ -448,7 +448,6 @@ def _start(service_name: str, tmp_task_yaml: str, job_id: int, entrypoint: str):
                 pool=service_spec.pool,
                 controller_pid=os.getpid(),
                 controller_ip=pod_ip,
-                version=version,
                 spec=service_spec,
                 yaml_content=yaml_content,
                 entrypoint=entrypoint)

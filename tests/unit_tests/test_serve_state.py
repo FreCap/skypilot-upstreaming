@@ -55,8 +55,32 @@ def _add_minimal_service(name: str, controller_ip=None):
         pool=False,
         controller_pid=12345,
         entrypoint='entry',
+        # A None spec is stored as pickled None (like `add_version` does), so
+        # the read path (`_get_service_from_row`) skips the spec-dependent
+        # fields instead of calling SkyServiceSpec methods on it.
+        spec=None,
+        yaml_content='yaml: v1',
         controller_ip=controller_ip,
     )
+
+
+def _insert_orphan_service_row(engine, name: str, pool: bool = False):
+    """Insert a `services` row with no `version_specs` row.
+
+    Simulates the debris stranded by the pre-atomic registration path (or an
+    interrupted teardown) on an older controller; `add_service` can no longer
+    produce this state."""
+    with orm.Session(engine) as session:
+        session.execute(serve_state.services_table.insert().values(
+            name=name,
+            controller_job_id=1,
+            status=serve_state.ServiceStatus.CONTROLLER_INIT.value,
+            requested_resources_str='1x[CPU:1+]',
+            pool=int(pool),
+            controller_pid=12345,
+            hash='orphan',
+            entrypoint='entry'))
+        session.commit()
 
 
 class TestAddServiceWritesControllerIp:
@@ -90,31 +114,8 @@ class TestAddServiceWritesControllerIp:
         assert record['controller_ip'] == '10.0.0.7'
 
 
-def _add_atomic_service(name: str, version=serve_constants.INITIAL_VERSION):
-    """Register a service + its initial version atomically (the new helper)."""
-    return serve_state.add_service_with_initial_version(
-        name=name,
-        controller_job_id=1,
-        policy='policy',
-        requested_resources_str='1x[CPU:1+]',
-        load_balancing_policy='round_robin',
-        status=serve_state.ServiceStatus.CONTROLLER_INIT,
-        tls_encrypted=False,
-        pool=False,
-        controller_pid=12345,
-        entrypoint='entry',
-        version=version,
-        # A None spec is stored as pickled None (like `add_version` does), so
-        # the read path (`_get_service_from_row`) skips the spec-dependent
-        # fields instead of calling SkyServiceSpec methods on it.
-        spec=None,
-        yaml_content='yaml: v1',
-        controller_ip='10.0.0.7',
-    )
-
-
-class TestAddServiceWithInitialVersion:
-    """First-run registration must write the `services` row and its initial
+class TestAddServiceAtomicRegistration:
+    """`add_service` must write the `services` row and its initial
     `version_specs` row atomically. The two-write path (add_service then
     add_or_update_version) had a crash window that stranded a `services` row
     with no version row -- invisible to the latest-version INNER JOIN, so it
@@ -123,23 +124,22 @@ class TestAddServiceWithInitialVersion:
     def test_service_is_visible_via_join(self, _mock_serve_db):
         # The whole point: after the atomic write, the service is reachable
         # through get_service_from_name (which INNER-JOINs version_specs).
-        assert _add_atomic_service('svc-atomic') is True
+        assert _add_minimal_service('svc-atomic') is True
         record = serve_state.get_service_from_name('svc-atomic')
         assert record is not None
-        assert record['controller_ip'] == '10.0.0.7'
 
     def test_writes_initial_version_row(self, _mock_serve_db):
-        _add_atomic_service('svc-ver')
+        _add_minimal_service('svc-ver')
         assert (serve_state.get_latest_version('svc-ver') ==
                 serve_constants.INITIAL_VERSION)
         assert serve_state.get_yaml_content(
             'svc-ver', serve_constants.INITIAL_VERSION) == 'yaml: v1'
 
-    def test_returns_false_on_duplicate(self, _mock_serve_db):
-        assert _add_atomic_service('svc-dup') is True
-        # Preserve add_service's contract: a duplicate name returns False so
-        # up() can short-circuit, and must not write a second version row.
-        assert _add_atomic_service('svc-dup') is False
+    def test_duplicate_does_not_write_second_version_row(self, _mock_serve_db):
+        assert _add_minimal_service('svc-dup') is True
+        # A duplicate name returns False so up() can short-circuit, and must
+        # not write a second version row.
+        assert _add_minimal_service('svc-dup') is False
         with orm.Session(_mock_serve_db) as session:
             versions = session.execute(
                 sqlalchemy.select(
@@ -148,40 +148,28 @@ class TestAddServiceWithInitialVersion:
                         'svc-dup')).fetchall()
         assert len(versions) == 1
 
-    def test_atomic_write_is_all_or_nothing(self, _mock_serve_db):
-        # Regression contrast: a bare `add_service` (the old first step) leaves
-        # a row that get_service_from_name cannot see -- the exact stranded
-        # orphan the atomic helper prevents.
-        _add_minimal_service('svc-bare')
-        assert _read_row(_mock_serve_db, 'svc-bare') is not None  # row exists
-        assert serve_state.get_service_from_name('svc-bare') is None  # invisible
-
-        # The atomic helper never produces that half-state.
-        _add_atomic_service('svc-whole')
-        assert serve_state.get_service_from_name('svc-whole') is not None
-
     def test_overwrites_stale_version_row(self, _mock_serve_db):
         # A stale initial version row with no services row (left behind by an
         # interrupted teardown on an older controller) must not block
         # re-registration of the name: the initial version write is an upsert,
         # matching the old add_or_update_version semantics.
         serve_state.add_or_update_version('svc-stale',
-                                          serve_constants.INITIAL_VERSION,
-                                          None, 'yaml: stale')
+                                          serve_constants.INITIAL_VERSION, None,
+                                          'yaml: stale')
         assert _read_row(_mock_serve_db, 'svc-stale') is None  # no svc row
 
-        assert _add_atomic_service('svc-stale') is True
+        assert _add_minimal_service('svc-stale') is True
         assert serve_state.get_service_from_name('svc-stale') is not None
         assert serve_state.get_yaml_content(
             'svc-stale', serve_constants.INITIAL_VERSION) == 'yaml: v1'
 
-    def test_get_service_pool_from_db_sees_bare_row(self, _mock_serve_db):
+    def test_get_service_pool_from_db_sees_orphan_row(self, _mock_serve_db):
         # The raw-pool accessor must read a version-less row (the orphan case)
         # that get_service_from_name's inner join hides -- this is what gates
         # the mode-scoped `down --purge` cleanup of such an orphan.
-        _add_minimal_service('svc-bare-pool')  # no version row -> orphan
-        assert serve_state.get_service_from_name('svc-bare-pool') is None
-        assert serve_state.get_service_pool_from_db('svc-bare-pool') is False
+        _insert_orphan_service_row(_mock_serve_db, 'svc-orphan')
+        assert serve_state.get_service_from_name('svc-orphan') is None
+        assert serve_state.get_service_pool_from_db('svc-orphan') is False
         assert serve_state.get_service_pool_from_db('never-existed') is None
 
 
@@ -189,11 +177,9 @@ class TestGetServiceFromNameReturnsControllerIp:
 
     def _add_with_version(self, service_name, controller_ip):
         # Reading via get_service_from_name requires a version_specs row
-        # (it's an INNER JOIN). Use the lightweight `add_version` helper,
-        # which inserts with spec=pickle.dumps(None) and yaml_content=NULL —
-        # enough for the JOIN to fire, no SkyServiceSpec wrangling needed.
+        # (it's an INNER JOIN); `add_service` writes the initial version row
+        # in the same transaction, so this is enough for the JOIN to fire.
         _add_minimal_service(service_name, controller_ip=controller_ip)
-        serve_state.add_version(service_name)
 
     def test_round_trips_controller_ip(self, _mock_serve_db):
         self._add_with_version('svc-rt', controller_ip='10.4.10.8')
