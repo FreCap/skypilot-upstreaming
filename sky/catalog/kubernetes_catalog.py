@@ -5,6 +5,7 @@ mapping SkyPilot image tags to corresponding container image tags.
 """
 import collections
 import re
+import time
 import typing
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from sky.catalog import CloudFilter
 from sky.catalog import common
 from sky.clouds import cloud
 from sky.provision.kubernetes import utils as kubernetes_utils
+from sky.utils import annotations
 
 if typing.TYPE_CHECKING:
     import pandas as pd
@@ -53,6 +55,35 @@ def is_image_tag_valid(tag: str, region: Optional[str]) -> bool:
     return common.is_image_tag_valid_impl(_image_df, tag, region)
 
 
+# Cache the non-realtime accelerator listing so the optimizer, which queries it
+# repeatedly within a single optimize() (once per resource per DAG node), does
+# not repeat the per-call work: the live check_credentials probe (one
+# Kubernetes API call per context) and the aggregation of node data into
+# per-accelerator counts. The underlying node scans (get_kubernetes_nodes,
+# accelerator-resource and GPU-label-formatter detection) are already
+# request-scoped lru caches, so this cache does not change how fresh the node
+# data is; like those inner caches, entries here are cleared at every
+# api-server request boundary. The ttl only bounds how long a cached result is
+# reused within a single long-running request. The cached value is the static
+# per-accelerator capacity/topology map (qtys_map) -- it never carries live
+# free-GPU counts. NEVER cache list_accelerators_realtime below -- it reports
+# live availability that must stay fresh.
+@annotations.ttl_cache(scope='request', timer=time.time, maxsize=10, ttl=30)
+def _list_accelerators_cached(
+    gpus_only: bool,
+    name_filter: Optional[str],
+    region_filter: Optional[str],
+    quantity_filter: Optional[int],
+    case_sensitive: bool,
+) -> Dict[str, List[common.InstanceTypeInfo]]:
+    return _list_accelerators(gpus_only,
+                              name_filter,
+                              region_filter,
+                              quantity_filter,
+                              case_sensitive,
+                              realtime=False)[0]
+
+
 def list_accelerators(
         gpus_only: bool,
         name_filter: Optional[str],
@@ -61,17 +92,12 @@ def list_accelerators(
         case_sensitive: bool = True,
         all_regions: bool = False,
         require_price: bool = True) -> Dict[str, List[common.InstanceTypeInfo]]:
-    # TODO(romilb): We should consider putting a lru_cache() with TTL to
-    #   avoid multiple calls to kubernetes API in a short period of time (e.g.,
-    #   from the optimizer).
-    return _list_accelerators(gpus_only,
-                              name_filter,
-                              region_filter,
-                              quantity_filter,
-                              case_sensitive,
-                              all_regions,
-                              require_price,
-                              realtime=False)[0]
+    # all_regions and require_price do not affect the result (see
+    # _list_accelerators, which discards them); keep them out of the cache key
+    # so logically identical calls share a single cache entry.
+    del all_regions, require_price  # Unused.
+    return _list_accelerators_cached(gpus_only, name_filter, region_filter,
+                                     quantity_filter, case_sensitive)
 
 
 def list_accelerators_realtime(

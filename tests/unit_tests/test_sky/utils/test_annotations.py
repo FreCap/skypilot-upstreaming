@@ -1,5 +1,7 @@
 """Unit tests for sky.utils.annotations."""
 
+import time
+
 from sky.utils import annotations
 
 
@@ -72,4 +74,71 @@ class TestLruCache:
         func_to_clear.cache_clear()
         result3 = func_to_clear(5)
         assert result3 == 5
+        assert call_count == 2  # Called again after clear
+
+
+class TestTtlCache:
+    """Tests for ttl_cache decorator."""
+
+    def test_caching_works(self):
+        """Test that ttl_cache decorator caches function results."""
+        call_count = 0
+
+        @annotations.ttl_cache(scope='global',
+                               timer=time.time,
+                               maxsize=5,
+                               ttl=60)
+        def expensive_func(x):
+            nonlocal call_count
+            call_count += 1
+            return x * 2
+
+        # First call
+        assert expensive_func(5) == 10
+        assert call_count == 1
+
+        # Second call with same arg should use cache
+        assert expensive_func(5) == 10
+        assert call_count == 1  # Not incremented
+
+        # Call with different arg should not use cache
+        assert expensive_func(10) == 20
+        assert call_count == 2
+
+    def test_cache_is_lock_guarded(self):
+        """Test that the shared TTLCache is guarded by a lock.
+
+        cachetools' memoizing decorators are not thread-safe without a lock,
+        and ttl_cache'd functions may be called concurrently (e.g. the
+        per-cloud catalog fan-out in subprocess_utils.run_in_parallel).
+        """
+
+        @annotations.ttl_cache(scope='global',
+                               timer=time.time,
+                               maxsize=5,
+                               ttl=60)
+        def cached_func(x):
+            return x
+
+        assert cached_func.cache_lock is not None
+
+    def test_request_scope_cache_clear(self):
+        """Test that request-scope ttl_cache is cleared with the request."""
+        call_count = 0
+
+        @annotations.ttl_cache(scope='request',
+                               timer=time.time,
+                               maxsize=5,
+                               ttl=60)
+        def request_scoped_func(x):
+            nonlocal call_count
+            call_count += 1
+            return x + 1
+
+        assert request_scoped_func(1) == 2
+        assert request_scoped_func(1) == 2
+        assert call_count == 1
+
+        annotations.clear_request_level_cache()
+        assert request_scoped_func(1) == 2
         assert call_count == 2  # Called again after clear
