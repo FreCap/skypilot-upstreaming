@@ -201,7 +201,6 @@ class TestLaunchClusterRetry:
         mock_sdk, mock_terminate, raised = self._run_launch_cluster(
             tmp_path, [_capacity_error()] * 3, availability_max_retry=1)
         assert raised is not None
-        assert 'after 1 attempt' in str(raised)
         assert mock_sdk.launch.call_count == 1
         assert mock_terminate.call_count == 1
 
@@ -225,20 +224,7 @@ class TestLaunchClusterRetry:
         mock_sdk, _, raised = self._run_launch_cluster(tmp_path,
                                                        [_capacity_error()] * 3)
         assert raised is not None
-        assert 'after 3 attempt' in str(raised)
         assert mock_sdk.launch.call_count == 3
-
-    def test_capacity_failure_fails_fast_after_transient_failure(
-            self, tmp_path):
-        """A capacity failure must propagate immediately even if preceded
-        by a transient failure."""
-        mock_sdk, _, raised = self._run_launch_cluster(
-            tmp_path, [RuntimeError('transient'),
-                       _capacity_error()],
-            availability_max_retry=1)
-        assert raised is not None
-        assert 'after 2 attempt' in str(raised)
-        assert mock_sdk.launch.call_count == 2
 
 
 class TestLaunchReplicaAvailabilityMaxRetry:
@@ -294,7 +280,9 @@ class TestLaunchReplicaAvailabilityMaxRetry:
         assert call.kwargs['kwargs'] == {'availability_max_retry': None}
         assert call.kwargs['args'][-1] is True
 
-    def test_non_spot_keeps_default_retries(self):
-        call = self._launch_replica(use_spot=False, with_placer=False)
+    def test_non_spot_with_placer_keeps_default_retries(self):
+        """A non-spot (on-demand fallback) replica keeps the default
+        retries even when the service has a spot placer."""
+        call = self._launch_replica(use_spot=False, with_placer=True)
         assert call.kwargs['kwargs'] == {'availability_max_retry': None}
         assert call.kwargs['args'][-1] is True

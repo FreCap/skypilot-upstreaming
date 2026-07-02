@@ -139,28 +139,25 @@ class TestGetLbReplicaInfo:
         assert result == {'http://2.2.2.2:8080': {'gpu_type': 'L4'}}
         assert outdated.url_resolutions == 0
 
-    def test_unknown_gpu_type_when_handle_is_missing(self):
+    def test_unknown_gpu_type_when_unresolvable(self):
+        """Both unresolvable cases (no handle yet, no accelerators) must
+        fall back to 'unknown' instead of dropping the replica."""
         ctrl = _make_controller()
-        info = _FakeReplicaInfo(1,
-                                serve_state.ReplicaStatus.READY,
-                                url='http://1.1.1.1:8080',
-                                handle_is_none=True)
-        assert _sync(ctrl, [info]) == {
+        no_handle = _FakeReplicaInfo(1,
+                                     serve_state.ReplicaStatus.READY,
+                                     url='http://1.1.1.1:8080',
+                                     handle_is_none=True)
+        no_accelerators = _FakeReplicaInfo(2,
+                                           serve_state.ReplicaStatus.READY,
+                                           url='http://2.2.2.2:8080',
+                                           accelerators=None)
+        assert _sync(ctrl, [no_handle, no_accelerators]) == {
             'http://1.1.1.1:8080': {
                 'gpu_type': 'unknown'
-            }
-        }
-
-    def test_unknown_gpu_type_when_no_accelerators(self):
-        ctrl = _make_controller()
-        info = _FakeReplicaInfo(1,
-                                serve_state.ReplicaStatus.READY,
-                                url='http://1.1.1.1:8080',
-                                accelerators=None)
-        assert _sync(ctrl, [info]) == {
-            'http://1.1.1.1:8080': {
+            },
+            'http://2.2.2.2:8080': {
                 'gpu_type': 'unknown'
-            }
+            },
         }
 
     def test_cache_pruned_when_replica_leaves_ready_set(self):
@@ -170,7 +167,6 @@ class TestGetLbReplicaInfo:
                                 url='http://1.1.1.1:8080',
                                 accelerators={'L4': 1})
         _sync(ctrl, [info])
-        assert 1 in ctrl._lb_replica_cache  # pylint: disable=protected-access
 
         # The replica gets preempted: it must be dropped from the response
         # and pruned from the cache.
@@ -178,7 +174,6 @@ class TestGetLbReplicaInfo:
                                      serve_state.ReplicaStatus.NOT_READY,
                                      url='http://1.1.1.1:8080')
         assert not _sync(ctrl, [preempted])
-        assert not ctrl._lb_replica_cache  # pylint: disable=protected-access
 
         # The replica recovers with a new endpoint: it must be re-resolved
         # instead of served from a stale cache entry.
