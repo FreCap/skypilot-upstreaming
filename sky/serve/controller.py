@@ -288,6 +288,13 @@ class SkyServeController:
 
         try:
             uvicorn.run(self._app, host=self._host, port=self._port)
+        except BaseException:  # pylint: disable=broad-except
+            # The finally below hard-exits, which would otherwise swallow the
+            # propagating exception -- log it so a crash-looping controller
+            # leaves a post-mortem trace.
+            logger.error('SkyServe Controller uvicorn server raised:\n'
+                         f'{traceback.format_exc()}')
+            raise
         finally:
             # If uvicorn.run() ever returns (a clean shutdown, a child-only
             # SIGINT raising KeyboardInterrupt, or any other exit), the HTTP
