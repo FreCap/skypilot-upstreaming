@@ -13,6 +13,7 @@ from sky.jobs import state as managed_job_state
 from sky.serve import constants
 from sky.serve import serve_state
 from sky.serve import serve_utils
+from sky.utils import common_utils
 
 if typing.TYPE_CHECKING:
     from sky.serve import replica_managers
@@ -619,12 +620,28 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             'InstanceAware Autoscaler requires dict type target_qps_per_replica'
         # Re-assign with correct type using setattr to avoid typing issues
         self.target_qps_per_replica = spec.target_qps_per_replica
+        # Memoizes a replica's resolved GPU type (replica_id -> gpu_type) so
+        # the blocking handle() DB read + unpickle is not repeated for the same
+        # replica across the 2-3 passes per decision tick. A type is cached
+        # only once the replica's launch has finished: while it is still
+        # provisioning, the cluster record is rewritten for every failover
+        # attempt and its accelerators can change, so a mid-launch resolution
+        # must be re-resolved on later ticks. After launch the type is fixed
+        # for the replica's lifetime. Pruned to the live replica set each tick.
+        self._gpu_type_cache: Dict[int, str] = {}
 
     def _generate_scaling_decisions(
         self,
         replica_infos: List['replica_managers.ReplicaInfo'],
     ) -> List[AutoscalerDecision]:
         """Generate autoscaling decisions with instance-aware logic."""
+        # Drop cached GPU types for replicas that no longer exist so the cache
+        # stays bounded to the live replica set.
+        live_replica_ids = {info.replica_id for info in replica_infos}
+        for replica_id in list(self._gpu_type_cache):
+            if replica_id not in live_replica_ids:
+                del self._gpu_type_cache[replica_id]
+
         # Always use instance-aware logic
         # since target_qps_per_replica is guaranteed to be dict
         self._set_target_num_replicas_with_instance_aware_logic(replica_infos)
@@ -828,6 +845,9 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
     def _get_gpu_type_from_replica_info(
             self, replica_info: 'replica_managers.ReplicaInfo') -> str:
         """Extract GPU type from ReplicaInfo object."""
+        cached = self._gpu_type_cache.get(replica_info.replica_id)
+        if cached is not None:
+            return cached
         gpu_type = 'unknown'
         handle = replica_info.handle()
         if handle is not None:
@@ -835,6 +855,15 @@ class InstanceAwareRequestRateAutoscaler(RequestRateAutoscaler):
             if accelerators and len(accelerators) > 0:
                 # Get the first accelerator type
                 gpu_type = list(accelerators.keys())[0]
+        # Cache only a resolved type of a replica whose launch has finished.
+        # While the replica is still provisioning, the cluster record (and
+        # thus launched_resources) is rewritten for every failover attempt, so
+        # the accelerator resolved mid-launch may not be the one the launch
+        # finally lands on and must be re-resolved on later ticks.
+        if (gpu_type != 'unknown' and
+                replica_info.status_property.sky_launch_status
+                == common_utils.ProcessStatus.SUCCEEDED):
+            self._gpu_type_cache[replica_info.replica_id] = gpu_type
         return gpu_type
 
     def _extract_target_qps_list_from_ready_replicas(

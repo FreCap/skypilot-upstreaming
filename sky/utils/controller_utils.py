@@ -1632,10 +1632,25 @@ def _get_request_parallelism(pool: bool) -> int:
             _get_number_of_services(pool))
 
 
-def can_provision(pool: bool) -> bool:
+def in_flight_launch_count() -> float:
+    """Launch-budget occupancy: provisioning + terminating / SERVE_LAUNCH_RATIO.
+
+    NOTE: this scans the whole replica table twice and unpickles every row
+    (O(N)). Callers that evaluate the launch budget for many replicas in a
+    single pass (e.g. ``ReplicaManager._refresh_thread_pool``) MUST compute this
+    once and track the delta locally -- passing it as ``in_flight`` to
+    ``can_provision``/``can_terminate`` -- rather than calling those per
+    replica, otherwise the cost is O(K*N) pickle.loads per refresh tick.
+    """
+    return (
+        serve_state.total_number_provisioning_replicas() +
+        serve_state.total_number_terminating_replicas() / SERVE_LAUNCH_RATIO)
+
+
+def can_provision(pool: bool, in_flight: Optional[float] = None) -> bool:
     # TODO(tian): probe API server to see if there is any pending provision
     # requests.
-    return can_terminate(pool)
+    return can_terminate(pool, in_flight=in_flight)
 
 
 def can_start_new_process(pool: bool) -> bool:
@@ -1674,10 +1689,9 @@ def get_max_services_error_message(pool: bool) -> str:
     return msg
 
 
-def can_terminate(pool: bool) -> bool:
+def can_terminate(pool: bool, in_flight: Optional[float] = None) -> bool:
     # TODO(tian): probe API server to see if there is any pending terminate
     # requests.
-    num_terminating = (
-        serve_state.total_number_provisioning_replicas() +
-        serve_state.total_number_terminating_replicas() / SERVE_LAUNCH_RATIO)
-    return num_terminating < _get_request_parallelism(pool)
+    if in_flight is None:
+        in_flight = in_flight_launch_count()
+    return in_flight < _get_request_parallelism(pool)
