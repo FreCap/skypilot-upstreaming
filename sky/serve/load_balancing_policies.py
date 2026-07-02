@@ -52,16 +52,14 @@ class LoadBalancingPolicy:
 
     def select_replica(self, request: 'fastapi.Request') -> Optional[str]:
         replica = self._select_replica(request)
-        # NOTE: this runs on the per-request routing hot path, inside the load
+        # NOTE: This runs on the per-request routing hot path, inside the load
         # balancer's client-pool lock on the uvicorn event-loop thread, so log
-        # only the cheap method + url. The previous code formatted a full
-        # request dump (``dict(request.headers)`` + the query params) as an
-        # f-string argument on *every* request, which (a) added per-
-        # request CPU on the lock-held routing path and (b) leaked auth headers
-        # into the LB log. ``request.url`` already includes the path + query.
-        # A DEBUG gate would not help: SkyPilot sets the logger level to DEBUG
-        # (the default *handler* filters at INFO), so ``isEnabledFor(DEBUG)`` is
-        # True and the dump would still be built every request.
+        # only the cheap method + url (``request.url`` already includes the
+        # path and query string). Do NOT log the request headers: they carry
+        # the ``Authorization`` header (bearer tokens). A DEBUG gate would not
+        # help, since SkyPilot sets the logger *level* to DEBUG (the default
+        # *handler* filters at INFO), so the message would still be built for
+        # every request.
         if replica is not None:
             logger.info('Selected replica %s for request %s %s', replica,
                         request.method, request.url)
