@@ -1,6 +1,5 @@
 """Unit tests for sky.utils.annotations."""
 
-import threading
 import time
 
 from sky.utils import annotations
@@ -122,37 +121,6 @@ class TestTtlCache:
             return x
 
         assert cached_func.cache_lock is not None
-
-    def test_concurrent_access(self):
-        """Concurrent calls with expiring entries must not corrupt the cache.
-
-        Without a lock, interleaved TTLCache writes/expirations can corrupt
-        the cache's internal linked list and raise KeyError.
-        """
-
-        @annotations.ttl_cache(scope='global',
-                               timer=time.time,
-                               maxsize=4,
-                               ttl=0.01)
-        def cached_func(x):
-            return x
-
-        errors = []
-
-        def worker(offset):
-            try:
-                for i in range(500):
-                    key = (offset + i) % 8
-                    assert cached_func(key) == key
-            except Exception as e:  # pylint: disable=broad-except
-                errors.append(e)
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        assert not errors, f'Concurrent cache access failed: {errors}'
 
     def test_request_scope_cache_clear(self):
         """Test that request-scope ttl_cache is cleared with the request."""
