@@ -4,7 +4,6 @@ Currently focused on `SkyPilotReplicaManager.__init__` startup ordering:
 the daemon threads (especially `_job_status_fetcher`) must NOT race the
 main thread for `self.lock` before `_recover_replica_operations` runs.
 """
-import threading
 from unittest import mock
 
 import pytest
@@ -142,16 +141,12 @@ class TestSkyPilotReplicaManagerInitOrdering:
         assert '_replica_prober' in started_targets
 
 
-def _make_manager(service_name='svc', next_replica_id=1):
+def _make_manager(service_name='svc'):
     """Build a bare SkyPilotReplicaManager with only the attributes the
-    recovery / scale-up id-allocator paths touch, skipping the heavy
-    __init__ (yaml parse, spot placer, daemon threads)."""
+    version-spec lookup touches, skipping the heavy __init__ (yaml parse,
+    spot placer, daemon threads)."""
     mgr = object.__new__(replica_managers.SkyPilotReplicaManager)
-    mgr.lock = threading.RLock()
     mgr._service_name = service_name
-    mgr._next_replica_id = next_replica_id
-    mgr._launch_thread_pool = {}
-    mgr._down_thread_pool = {}
     mgr._tick_version_spec_cache = {}
     return mgr
 

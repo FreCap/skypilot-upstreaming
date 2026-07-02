@@ -7,7 +7,7 @@ ENTIRE replica table twice (``serve_state.total_number_provisioning_replicas``
 + ``total_number_terminating_replicas``). That is O(K*N) ``pickle.loads`` per
 refresh tick (measured ~1.7s at N=2000, K=140; grows with fleet size), burning
 the refresh loop's CPU budget on bookkeeping instead of starting launches and
-drains. (It is a control-loop CPU/scalability fix, not an LB-503 fix.)
+drains.
 
 The fix hoists the budget read ONCE per tick via
 ``controller_utils.in_flight_launch_count`` and tracks the delta locally, so the
@@ -17,8 +17,6 @@ These tests fail on the pre-fix code (the per-replica predicate has no
 ``in_flight`` parameter and the loop scans K times) and pass after it.
 """
 import threading
-
-import pytest
 
 from sky.serve import replica_managers
 from sky.serve import serve_state
