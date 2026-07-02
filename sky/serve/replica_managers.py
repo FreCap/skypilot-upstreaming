@@ -1379,7 +1379,9 @@ class SkyPilotReplicaManager(ReplicaManager):
         to minutes); holding the lock across the walk would block the
         refresher / prober / scaler -- which all take ``self.lock`` -- for the
         whole walk, stalling autoscaling exactly when the fleet is churning.
-        The lock is taken only for the brief state mutations.
+        The lock is re-acquired only on the failure-handling paths (preemption
+        and user-code failure); those paths may still run a cloud status
+        refresh or a log sync while holding it.
         """
         infos = serve_state.get_replica_infos(self._service_name)
         for info in infos:
@@ -1389,7 +1391,12 @@ class SkyPilotReplicaManager(ReplicaManager):
             # sdk.job_status.
             backend = backends.CloudVmRayBackend()
             handle = info.handle()
-            assert handle is not None, info
+            if handle is None:
+                # The walk runs lock-free, so the replica's cluster record can
+                # vanish mid-walk (a scale-down or preemption cleanup
+                # completing after the snapshot was taken). Skip it; the next
+                # round re-snapshots.
+                continue
             # Use None to fetch latest job, which stands for user task job
             job_ids = [1] if self._is_pool else None
             try:
@@ -1425,7 +1432,8 @@ class SkyPilotReplicaManager(ReplicaManager):
                     # were SSHing without the lock.
                     fresh = serve_state.get_replica_info_from_id(
                         self._service_name, info.replica_id)
-                    if fresh is None:
+                    if fresh is None or not (
+                            fresh.status_property.should_track_service_status()):
                         continue
                     fresh.status_property.user_app_failed = True
                     serve_state.add_or_update_replica(self._service_name,
