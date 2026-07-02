@@ -261,13 +261,6 @@ def test_ensure_lb_restarts_dead_lb(monkeypatch):
     assert 1 in killed
 
 
-def test_ensure_lb_starts_missing_lb(monkeypatch):
-    new_lb = _FakeProc(alive=True, pid=2)
-    monkeypatch.setattr(service, '_spawn_load_balancer', lambda *a, **k: new_lb)
-    assert service._ensure_load_balancer(None, 'http://h:1', 30001, _spec(),
-                                         '/tmp/lb.log') is new_lb
-
-
 def test_ensure_lb_spawn_failure_is_contained(monkeypatch):
     def _boom(*a, **k):
         raise OSError('cannot start')

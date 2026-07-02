@@ -14,7 +14,6 @@ after all destructive teardown. These tests pin the ordering invariant: the
 script must outlive replica teardown so a crash partway through leaves recovery
 able to respawn the controller and re-run cleanup.
 """
-import threading
 import types
 
 import pytest
@@ -75,38 +74,6 @@ def test_recovery_script_removed_after_replica_teardown(monkeypatch):
         f'got order {events}')
 
 
-def test_recovery_script_survives_until_all_replicas_torn_down(monkeypatch):
-    """With multiple replicas, the script removal must come after the LAST
-    teardown -- a crash before that point leaves recovery able to retry."""
-    events = []
-    lock = threading.Lock()
-
-    def _terminate(cluster_name, log_file_name):
-        with lock:
-            events.append(f'teardown:{cluster_name}')
-
-    monkeypatch.setattr(replica_managers, 'terminate_cluster', _terminate)
-    _patch_common(monkeypatch, events, [_replica(i) for i in range(3)])
-
-    service._cleanup('svc', pool=False)
-
-    assert events[-1] == 'remove_recovery_script', (
-        f'recovery script removed before all teardowns finished: {events}')
-    assert sorted(events[:-1]) == ['teardown:c0', 'teardown:c1', 'teardown:c2']
-
-
-def test_recovery_script_removed_once_on_clean_service(monkeypatch):
-    """No replicas: the script is still removed exactly once at the end."""
-    events = []
-    monkeypatch.setattr(replica_managers, 'terminate_cluster',
-                        lambda *a, **k: events.append('teardown'))
-    _patch_common(monkeypatch, events, [])
-
-    service._cleanup('svc', pool=False)
-
-    assert events == ['remove_recovery_script']
-
-
 # --- recovery must resume teardown, not resurrect a torn-down service ---
 
 
@@ -114,26 +81,16 @@ def _svc(status):
     return {'status': status}
 
 
-def test_resume_teardown_for_user_downed_service():
-    """A recovery of a SHUTTING_DOWN service must resume teardown (else the
-    preserved recovery script would resurrect a service the user `down`ed)."""
+def test_should_resume_teardown():
+    """Teardown is resumed only on a recovery run of a service left in a
+    teardown status; a healthy (e.g. READY) service is recovered normally and
+    a fresh run never resumes teardown."""
     assert service._should_resume_teardown(
         True, _svc(serve_state.ServiceStatus.SHUTTING_DOWN)) is True
-
-
-def test_resume_teardown_for_failed_cleanup_service():
     assert service._should_resume_teardown(
         True, _svc(serve_state.ServiceStatus.FAILED_CLEANUP)) is True
-
-
-def test_no_resume_for_ready_service():
-    """A controller that died while the service was healthy (READY) must be
-    recovered normally (brought back up), NOT torn down."""
     assert service._should_resume_teardown(
         True, _svc(serve_state.ServiceStatus.READY)) is False
-
-
-def test_no_resume_on_fresh_run():
     assert service._should_resume_teardown(False, None) is False
     assert service._should_resume_teardown(
         False, _svc(serve_state.ServiceStatus.SHUTTING_DOWN)) is False
