@@ -30,6 +30,8 @@ LONG_WORKER_MEM_GB = 0.4
 SHORT_WORKER_MEM_GB = 0.3
 # To control the number of long workers.
 _CPU_MULTIPLIER_FOR_LONG_WORKERS = 2
+# Env var to override _CPU_MULTIPLIER_FOR_LONG_WORKERS.
+LONG_WORKER_CPU_MULTIPLIER_ENV_VAR = 'SKYPILOT_LONG_WORKER_CPU_MULTIPLIER'
 # Limit the number of long workers of local API server, since local server is
 # typically:
 # 1. launched automatically in an environment with high resource contention
@@ -222,7 +224,21 @@ def _max_long_worker_parallism(cpu_count: int,
                   if job_utils.is_consolidation_mode() else
                   server_constants.MIN_AVAIL_MEM_GB)
     available_mem = max(0, mem_size_gb - max_memory)
-    cpu_based_max_parallel = cpu_count * _CPU_MULTIPLIER_FOR_LONG_WORKERS
+    # A long worker is held for the entire duration of a launch (minutes), so
+    # this pool bounds how many launches can provision concurrently. Launches
+    # are I/O-bound, so the multiplier can be raised via the env var to widen
+    # provisioning concurrency without allocating more CPUs to the server.
+    cpu_multiplier = _CPU_MULTIPLIER_FOR_LONG_WORKERS
+    multiplier_override = os.environ.get(LONG_WORKER_CPU_MULTIPLIER_ENV_VAR)
+    if multiplier_override is not None:
+        try:
+            cpu_multiplier = max(1, int(multiplier_override))
+        except ValueError:
+            logger.warning(
+                f'Invalid {LONG_WORKER_CPU_MULTIPLIER_ENV_VAR} value '
+                f'{multiplier_override!r}, using the default multiplier '
+                f'{_CPU_MULTIPLIER_FOR_LONG_WORKERS}.')
+    cpu_based_max_parallel = cpu_count * cpu_multiplier
     mem_based_max_parallel = int(available_mem * _MAX_MEM_PERCENT_FOR_BLOCKING /
                                  LONG_WORKER_MEM_GB)
     n = max(_MIN_LONG_WORKERS,

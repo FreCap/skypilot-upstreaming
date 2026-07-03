@@ -163,7 +163,7 @@ def _bearer_auth_401_response(content):
         content=content)
 
 
-def _try_set_basic_auth_user(request: fastapi.Request):
+async def _try_set_basic_auth_user(request: fastapi.Request):
     auth_header = request.headers.get('authorization')
     if not auth_header or not auth_header.lower().startswith('basic '):
         return
@@ -176,7 +176,8 @@ def _try_set_basic_auth_user(request: fastapi.Request):
     except Exception:  # pylint: disable=broad-except
         return
 
-    users = global_user_state.get_user_by_name(username)
+    users = await asyncio.to_thread(global_user_state.get_user_by_name,
+                                    username)
     if not users:
         return
 
@@ -185,8 +186,8 @@ def _try_set_basic_auth_user(request: fastapi.Request):
             continue
         username_encoded = username.encode('utf8')
         db_username_encoded = user.name.encode('utf8')
-        if (username_encoded == db_username_encoded and
-                common.crypt_ctx.verify(password, user.password)):
+        if (username_encoded == db_username_encoded and await asyncio.to_thread(
+                common.crypt_ctx.verify, password, user.password)):
             request.state.auth_user = user
             break
 
@@ -350,7 +351,7 @@ class BasicAuthMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
 
         if request.url.path.startswith('/api/health'):
             # Try to set the auth user from basic auth
-            _try_set_basic_auth_user(request)
+            await _try_set_basic_auth_user(request)
             return await call_next(request)
 
         auth_header = request.headers.get('authorization')
@@ -369,7 +370,8 @@ class BasicAuthMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
         except Exception:  # pylint: disable=broad-except
             return _basic_auth_401_response('Invalid basic auth')
 
-        users = global_user_state.get_user_by_name(username)
+        users = await asyncio.to_thread(global_user_state.get_user_by_name,
+                                        username)
         if not users:
             return _basic_auth_401_response('Invalid credentials')
 
@@ -380,7 +382,8 @@ class BasicAuthMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             username_encoded = username.encode('utf8')
             db_username_encoded = user.name.encode('utf8')
             if (username_encoded == db_username_encoded and
-                    common.crypt_ctx.verify(password, user.password)):
+                    await asyncio.to_thread(common.crypt_ctx.verify, password,
+                                            user.password)):
                 valid_user = True
                 request.state.auth_user = user
                 break
@@ -486,7 +489,8 @@ class BearerTokenMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             # JWT carries a freshly-generated token_id; only the hash is
             # consistent between the live JWT and the live DB row.
             incoming_hash = hashlib.sha256(sa_token.encode()).hexdigest()
-            token_row = global_user_state.get_service_account_token_by_hash(
+            token_row = await asyncio.to_thread(
+                global_user_state.get_service_account_token_by_hash,
                 incoming_hash)
             if token_row is None:
                 logger.warning(
@@ -502,7 +506,8 @@ class BearerTokenMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                     {'detail': 'Service account token has expired'})
 
             # Verify user still exists in database
-            user_info = global_user_state.get_user(user_id)
+            user_info = await asyncio.to_thread(global_user_state.get_user,
+                                                user_id)
             if user_info is None:
                 logger.warning(
                     f'Service account user {user_id} no longer exists')
@@ -513,7 +518,8 @@ class BearerTokenMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             # DB row's token_id (not the JWT's): after rotation the JWT
             # carries a different token_id than the DB row.
             try:
-                global_user_state.update_service_account_token_last_used(
+                await asyncio.to_thread(
+                    global_user_state.update_service_account_token_last_used,
                     token_row['token_id'])
             except Exception as e:  # pylint: disable=broad-except
                 logger.debug(f'Failed to update token last used time: {e}')
@@ -573,7 +579,8 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
 
         # Add user to database if auth_user is present
         if auth_user is not None:
-            newly_added = global_user_state.add_or_update_user(auth_user)
+            newly_added = await asyncio.to_thread(
+                global_user_state.add_or_update_user, auth_user)
             if newly_added:
                 permission.permission_service.add_user_if_not_exists(
                     auth_user.id)
@@ -2596,17 +2603,20 @@ async def api_status(
                 fields=fields,
                 sort=True,
             ))
-        return requests_lib.encode_requests(request_tasks)
+        # encode_requests does a sync DB read; keep it off the event loop.
+        return await asyncio.to_thread(requests_lib.encode_requests,
+                                       request_tasks)
     else:
-        encoded_request_tasks = []
+        matched_request_tasks = []
         for request_id in request_ids:
             request_tasks = await requests_lib.get_requests_async_with_prefix(
                 request_id)
             if request_tasks is None:
                 continue
-            for request_task in request_tasks:
-                encoded_request_tasks.append(request_task.readable_encode())
-        return encoded_request_tasks
+            matched_request_tasks.extend(request_tasks)
+        # encode_requests does a sync DB read; keep it off the event loop.
+        return await asyncio.to_thread(requests_lib.encode_requests,
+                                       matched_request_tasks)
 
 
 @app.get('/dashboard_config')

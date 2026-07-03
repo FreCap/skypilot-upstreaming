@@ -159,7 +159,8 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                                 'return user info, check your oauth2-proxy'
                                 'setup.'
                         })
-                newly_added = global_user_state.add_or_update_user(auth_user)
+                newly_added = await asyncio.to_thread(
+                    global_user_state.add_or_update_user, auth_user)
                 if newly_added:
                     permission.permission_service.add_user_if_not_exists(
                         auth_user.id)
