@@ -2603,8 +2603,7 @@ async def api_status(
                 fields=fields,
                 sort=True,
             ))
-        # encode_requests does a sync get_all_users() DB read; offload it so
-        # the event loop is not blocked.
+        # encode_requests does a sync DB read; keep it off the event loop.
         return await asyncio.to_thread(requests_lib.encode_requests,
                                        request_tasks)
     else:
@@ -2615,9 +2614,7 @@ async def api_status(
             if request_tasks is None:
                 continue
             matched_request_tasks.extend(request_tasks)
-        # encode_requests resolves user names with a single batched
-        # get_all_users() lookup for all matched rows; offload the sync DB
-        # read so the event loop is not blocked.
+        # encode_requests does a sync DB read; keep it off the event loop.
         return await asyncio.to_thread(requests_lib.encode_requests,
                                        matched_request_tasks)
 

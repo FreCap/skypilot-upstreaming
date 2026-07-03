@@ -224,12 +224,10 @@ def _max_long_worker_parallism(cpu_count: int,
                   if job_utils.is_consolidation_mode() else
                   server_constants.MIN_AVAIL_MEM_GB)
     available_mem = max(0, mem_size_gb - max_memory)
-    # A long worker is held for the entire duration of a launch (provision +
-    # SSH + setup, typically minutes), so this pool bounds how many launches
-    # can provision concurrently. Launches are I/O-bound (SSH and cloud APIs),
-    # so the CPU multiplier can be raised via the env var to widen
-    # provisioning concurrency without allocating more CPUs to the server. An
-    # invalid value falls back to the default; the multiplier is floored at 1.
+    # A long worker is held for the entire duration of a launch (minutes), so
+    # this pool bounds how many launches can provision concurrently. Launches
+    # are I/O-bound, so the multiplier can be raised via the env var to widen
+    # provisioning concurrency without allocating more CPUs to the server.
     cpu_multiplier = _CPU_MULTIPLIER_FOR_LONG_WORKERS
     multiplier_override = os.environ.get(LONG_WORKER_CPU_MULTIPLIER_ENV_VAR)
     if multiplier_override is not None:
